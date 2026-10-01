@@ -13,10 +13,8 @@ class Settings:
     bot_token: str
     admin_ids: frozenset[int]
     group_name: str
-    schedule_api_base: str
     database_path: Path
-    schedule_proxy: str | None
-    vless_url: str | None
+    schedule_file: Path
 
 
 def load_settings() -> Settings:
@@ -24,11 +22,13 @@ def load_settings() -> Settings:
     if not token:
         raise RuntimeError("Заполните secrets/.env: BOT_TOKEN обязателен")
     admins = frozenset(int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip())
-    return Settings(token, admins, os.getenv("GROUP_NAME", "ИКБО-12-24"),
-                    os.getenv("SCHEDULE_API_BASE", "https://schedule-of.mirea.ru").rstrip("/"),
-                    ROOT / os.getenv("DATABASE_PATH", "data/queue.sqlite3"),
-                    os.getenv("SCHEDULE_PROXY", "").strip() or None,
-                    os.getenv("VLESS_URL", "").strip() or None)
+    return Settings(
+        bot_token=token,
+        admin_ids=admins,
+        group_name=os.getenv("GROUP_NAME", "ИКБО-12-24"),
+        database_path=ROOT / os.getenv("DATABASE_PATH", "data/queue.sqlite3"),
+        schedule_file=ROOT / os.getenv("SCHEDULE_FILE", "schedule/IKBO-12-24.ics"),
+    )
 
 
 settings = load_settings()

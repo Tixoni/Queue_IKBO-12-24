@@ -11,9 +11,5 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install xray (for end-to-end proxy tests)
-        run: |
-          curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          sudo unzip -j /tmp/xray.zip xray -d /usr/local/bin
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
