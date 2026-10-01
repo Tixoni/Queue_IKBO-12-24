@@ -197,8 +197,9 @@ async def test_duplicate_topic_list_title_asks_again(db, user, state):
 
 async def test_topic_list_for_legacy_queue_is_refused(db, user, state):
     async with db.transaction() as conn:
-        cur = await conn.execute("INSERT INTO deadlines(event_date,title) VALUES(?,?)", (day(1), "Старая"))
-        queue_id = cur.lastrowid
+        queue_id = await conn.fetchval(
+            "INSERT INTO deadlines(event_date,title) VALUES($1,$2) RETURNING id", day(1), "Старая"
+        )
     callback = make_callback(user, f"ui:topic-list:create:{queue_id}")
 
     await handlers.start_topic_list(callback, state, db)

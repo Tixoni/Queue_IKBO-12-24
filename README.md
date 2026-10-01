@@ -1,18 +1,18 @@
 # Бот очереди к практическим работам
 
-Python 3.11+, aiogram 3, SQLite. Бот работает long polling на вашем ПК. SQLite WAL, `busy_timeout`, `BEGIN IMMEDIATE` и уникальность `(очередь, Telegram user_id)` предотвращают дубли и гонки между одновременными нажатиями, пока работает один экземпляр бота на одном компьютере.
+Python 3.11+, aiogram 3, PostgreSQL (asyncpg). Бот работает через long polling. Транзакции и уникальность `(очередь, Telegram user_id)` в PostgreSQL предотвращают дубли и гонки между одновременными нажатиями.
 
 ## Запуск
 
 1. Установите Python 3.11+.
 2. В отдельном PowerShell: `py -m venv .venv`, затем `.venv\Scripts\Activate.ps1`.
 3. `pip install -r requirements.txt`.
-4. Создайте `secrets/.env` по образцу в `secrets/README.md`.
+4. Создайте `secrets/.env` по образцу в `secrets/README.md` (нужны `BOT_TOKEN` и `DATABASE_URL`).
 5. Запустите бота командой `py main.py`.
 
 Секреты (токен Telegram и список ID администраторов) хранятся в `secrets/.env`, папка исключена из Git. Расписание берётся из файла в репозитории (см. ниже), запись открыта на 14 дней вперёд.
 
-При сетевой ошибке `schedule-of.mirea.ru` проверьте подключение к интернету и доступ к домену университета. При сетевой ошибке `api.telegram.org` проверьте доступ Telegram Bot API из вашей сети; бот автоматически повторяет попытки подключения.
+При сетевой ошибке `api.telegram.org` проверьте доступ Telegram Bot API из вашей сети; бот автоматически повторяет попытки подключения.
 
 ## Структура кода
 
@@ -21,16 +21,17 @@ Python 3.11+, aiogram 3, SQLite. Бот работает long polling на ва�
 - `src/bot/screens.py` — сборка текста и клавиатуры экранов.
 - `src/bot/keyboards.py`, `src/bot/formatting.py` — клавиатуры и форматирование (`Lesson` — разобранная пара).
 - `src/sync.py` — раскладывает расписание на ближайшие 14 дней (при старте и каждые 6 часов).
-- `src/db.py` — SQLite (схема не менялась), `src/schedule.py` — разбор iCalendar МИРЭА; `schedule/` — файл расписания, `tools/update_schedule.py` — его обновление.
+- `src/db.py` — PostgreSQL: схема создаётся автоматически при старте, `src/schedule.py` — разбор iCalendar МИРЭА; `schedule/` — файл расписания, `tools/update_schedule.py` — его обновление.
 
 ## Тесты
 
 ```
 pip install -r requirements-dev.txt
-pytest
+docker run -d --name queue-test-pg -e POSTGRES_PASSWORD=test -p 5433:5432 postgres:16
+TEST_DATABASE_URL=postgresql://postgres:test@localhost:5433/postgres pytest
 ```
 
-Тесты используют временную базу и фейковые объекты Telegram — реальный токен и сеть не нужны. В GitHub Actions тесты гоняются на каждый push.
+Тесты базы работают с настоящим PostgreSQL из `TEST_DATABASE_URL`: каждый тест создаёт свою временную схему и удаляет её (без переменной эти тесты пропускаются). Остальные тесты используют фейковые объекты Telegram — реальный токен и сеть не нужны. В GitHub Actions тесты гоняются на каждый push.
 
 ## Возможности
 

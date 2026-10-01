@@ -1,14 +1,18 @@
 import json
 import os
+import uuid
 from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import asyncpg
 import pytest
 
 # src.config reads the environment at import time; tests must never touch real secrets.
 os.environ["BOT_TOKEN"] = "123456:TEST"
 os.environ["ADMIN_IDS"] = "1"
+os.environ["DATABASE_URL"] = "postgresql://unused"  # the bot's own DB is never used by tests
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
 from aiogram.fsm.context import FSMContext  # noqa: E402
 from aiogram.fsm.storage.base import StorageKey  # noqa: E402
@@ -31,10 +35,21 @@ def schedule_event(key: str, event_date: str, starts: str = "09:00", title: str 
 
 
 @pytest.fixture
-async def db(tmp_path):
-    database = QueueDB(tmp_path / "queue.sqlite3")
-    await database.initialize()
-    return database
+async def db():
+    """A fresh schema per test in TEST_DATABASE_URL, dropped afterwards; other data is never touched."""
+    if not TEST_DATABASE_URL:
+        pytest.skip("set TEST_DATABASE_URL to a PostgreSQL database to run DB tests")
+    schema = f"test_{uuid.uuid4().hex}"
+    admin = await asyncpg.connect(TEST_DATABASE_URL)
+    await admin.execute(f'CREATE SCHEMA "{schema}"')
+    database = QueueDB(TEST_DATABASE_URL, server_settings={"search_path": schema})
+    try:
+        await database.initialize()
+        yield database
+    finally:
+        await database.close()
+        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        await admin.close()
 
 
 @pytest.fixture

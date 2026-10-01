@@ -1,6 +1,8 @@
 import asyncio
 import logging
 
+import asyncpg
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -29,10 +31,23 @@ async def wait_for_telegram(bot: Bot) -> None:
             delay = min(delay * 2, 60)
 
 
+async def connect_db(db: QueueDB, attempts: int = 10) -> None:
+    """Postgres may still be booting when the bot starts (e.g. right after a Railway deploy)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            await db.initialize()
+            return
+        except (OSError, asyncpg.PostgresError) as exc:
+            if attempt == attempts:
+                raise
+            log.warning("Database is not ready (%s: %s); retry %s/%s in 3 s.", type(exc).__name__, exc, attempt, attempts)
+            await asyncio.sleep(3)
+
+
 async def main() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    db = QueueDB(settings.database_path)
-    await db.initialize()
+    db = QueueDB(settings.database_url)
+    await connect_db(db)
     schedule = FileSchedule(settings.schedule_file, settings.group_name)
 
     dp = Dispatcher(storage=MemoryStorage(), db=db)
@@ -46,6 +61,7 @@ async def main() -> None:
         await dp.start_polling(bot, handle_as_tasks=False)
     finally:
         refresh_task.cancel()
+        await db.close()
         await bot.session.close()
 
 

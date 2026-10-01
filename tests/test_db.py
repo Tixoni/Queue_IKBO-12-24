@@ -29,6 +29,25 @@ async def test_sync_schedule_keeps_rows_outside_window(db):
     assert not await db.has_schedule()
 
 
+async def test_lesson_ids_survive_resync(db):
+    """Buttons carry the lesson id, so a periodic refresh must not renumber lessons."""
+    await db.sync_schedule([schedule_event("a", day(1)), schedule_event("b", day(1), starts="11:00")])
+    before = {row["event_key"]: row["id"] for row in await db.list_schedule_for_date(day(1))}
+    await db.sync_schedule([schedule_event("b", day(1), starts="11:00", title="Новое"), schedule_event("a", day(1))])
+    after = {row["event_key"]: (row["id"], row["title"]) for row in await db.list_schedule_for_date(day(1))}
+
+    assert after == {"a": (before["a"], "Математика"), "b": (before["b"], "Новое")}
+
+
+async def test_telegram_ids_above_32_bits(db):
+    queue_id = await make_queue(db)
+    big_id = 8_817_961_121
+    assert await db.join(queue_id, big_id, "Бот") == JOINED
+    await db.set_user_name(big_id, "Имя")
+    assert await db.is_registered(queue_id, big_id)
+    assert await db.get_user_name(big_id) == "Имя"
+
+
 async def test_schedule_lookups(db):
     await db.sync_schedule([schedule_event("a", day(1), starts="12:00"), schedule_event("b", day(1), starts="09:00")])
     rows = await db.list_schedule_for_date(day(1))
@@ -75,7 +94,7 @@ async def test_join_respects_booking_window(db):
 async def test_join_unknown_or_closed_queue(db):
     queue_id = await make_queue(db)
     async with db.transaction() as conn:
-        await conn.execute("UPDATE deadlines SET active=0 WHERE id=?", (queue_id,))
+        await conn.execute("UPDATE deadlines SET active=FALSE WHERE id=$1", queue_id)
 
     assert "не найдена" in await db.join(queue_id, 1, "A")
     assert "не найдена" in await db.join(9999, 1, "A")
@@ -88,6 +107,20 @@ async def test_concurrent_joins_keep_one_registration(db):
 
     assert results.count(JOINED) == 1
     assert await db.get_queue(queue_id) == ["Дубль"]
+
+
+async def test_concurrent_queue_creation_returns_one_id(db):
+    ids = await asyncio.gather(*(make_queue(db) for _ in range(10)))
+    assert len(set(ids)) == 1
+
+
+async def test_concurrent_add_topics_respect_cap(db):
+    _, list_id = await make_list(db, topics=())
+    half = MAX_TOPICS_PER_LIST // 2 + 1
+    batches = [[f"{n}-{i}" for i in range(half)] for n in range(2)]
+    results = await asyncio.gather(*(db.add_topics(list_id, batch) for batch in batches))
+
+    assert sorted(results) == [TOPIC_LIST_FULL, half]
 
 
 async def test_queue_order_follows_join_order(db):
