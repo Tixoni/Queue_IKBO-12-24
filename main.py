@@ -12,6 +12,7 @@ from src.config import settings
 from src.db import QueueDB
 from src.schedule import ScheduleClient
 from src.sync import refresh_loop
+from src.xray import SOCKS_URL, start_xray
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -33,7 +34,15 @@ async def main() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     db = QueueDB(settings.database_path)
     await db.initialize()
-    schedule = ScheduleClient(settings.schedule_api_base, settings.schedule_proxy)
+    xray = None
+    proxy = settings.schedule_proxy
+    if settings.vless_url:
+        try:
+            xray = await start_xray(settings.vless_url)
+            proxy = SOCKS_URL
+        except Exception as exc:
+            log.error("Не удалось запустить прокси для расписания (%s); пробую без него.", exc)
+    schedule = ScheduleClient(settings.schedule_api_base, proxy)
 
     dp = Dispatcher(storage=MemoryStorage(), db=db, schedule=schedule)
     dp.include_router(router)
@@ -49,6 +58,8 @@ async def main() -> None:
     finally:
         refresh_task.cancel()
         await schedule.close()
+        if xray:
+            await xray.stop()
         await bot.session.close()
 
 
