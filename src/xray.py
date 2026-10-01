@@ -18,9 +18,17 @@ STARTUP_TIMEOUT = 15
 
 def build_config(vless_url: str) -> dict:
     """Xray config with a local SOCKS inbound and a single VLESS (TCP + REALITY/TLS) outbound."""
-    link = urlsplit(vless_url.strip())
-    if link.scheme != "vless" or not link.hostname or not link.port or not link.username:
-        raise ValueError("VLESS_URL должен иметь вид vless://UUID@хост:порт?параметры")
+    link = urlsplit(vless_url.strip().strip("\"'").strip())
+    if link.scheme != "vless":
+        raise ValueError(
+            f"VLESS_URL должен начинаться с vless://, а начинается с «{link.scheme or 'пусто'}://». "
+            "Ссылку на подписку нужно сначала превратить в ссылку сервера (tools/get_vless.py)"
+        )
+    missing = [
+        name for name, value in (("UUID", link.username), ("хост", link.hostname), ("порт", link.port)) if not value
+    ]
+    if missing:
+        raise ValueError(f"В VLESS_URL не хватает: {', '.join(missing)}. Нужен вид vless://UUID@хост:порт?параметры")
     params = {key: values[0] for key, values in parse_qs(link.query).items()}
     network = params.get("type", "tcp")
     if network != "tcp":
