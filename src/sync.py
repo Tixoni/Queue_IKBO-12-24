@@ -26,8 +26,8 @@ async def refresh_loop(schedule: ScheduleClient, db: QueueDB, group: str, api_ba
         except httpx.TransportError as exc:
             delay = RETRY_INTERVAL
             log.warning(
-                "Cannot reach schedule API at %s (%s); timetable cache was kept, retry in %s min.",
-                api_base, type(exc).__name__, delay // 60,
+                "Cannot reach schedule API at %s (%s: %s); timetable cache was kept, retry in %s min.",
+                api_base, type(exc).__name__, exc or "no details", delay // 60,
             )
         except Exception:
             delay = RETRY_INTERVAL

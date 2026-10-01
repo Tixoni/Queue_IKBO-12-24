@@ -12,7 +12,7 @@ from src.config import settings
 from src.db import QueueDB
 from src.schedule import ScheduleClient
 from src.sync import refresh_loop
-from src.xray import SOCKS_URL, start_xray
+from src.xray import SOCKS_URL, log_exit, start_xray
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ async def main() -> None:
         try:
             xray = await start_xray(settings.vless_url)
             proxy = SOCKS_URL
+            await log_exit(proxy)
         except Exception as exc:
             log.error("Не удалось запустить прокси для расписания (%s); пробую без него.", exc)
     schedule = ScheduleClient(settings.schedule_api_base, proxy)

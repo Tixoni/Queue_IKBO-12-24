@@ -8,15 +8,18 @@ import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import httpx
+
 log = logging.getLogger(__name__)
 
 SOCKS_HOST = "127.0.0.1"
 SOCKS_PORT = 10808
 SOCKS_URL = f"socks5://{SOCKS_HOST}:{SOCKS_PORT}"
 STARTUP_TIMEOUT = 15
+EXIT_CHECK_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 
 
-def build_config(vless_url: str) -> dict:
+def build_config(vless_url: str, socks_port: int = SOCKS_PORT) -> dict:
     """Xray config with a local SOCKS inbound and a single VLESS (TCP + REALITY/TLS) outbound."""
     link = urlsplit(vless_url.strip().strip("\"'").strip())
     if link.scheme != "vless":
@@ -51,9 +54,9 @@ def build_config(vless_url: str) -> dict:
         stream["tlsSettings"] = {"serverName": params.get("sni", link.hostname), "fingerprint": params.get("fp", "chrome")}
 
     return {
-        "log": {"loglevel": "warning"},
+        "log": {"loglevel": "warning", "access": "none"},
         "inbounds": [{
-            "listen": SOCKS_HOST, "port": SOCKS_PORT, "protocol": "socks",
+            "listen": SOCKS_HOST, "port": socks_port, "protocol": "socks",
             "settings": {"udp": False, "auth": "noauth"},
         }],
         "outbounds": [{
@@ -65,11 +68,24 @@ def build_config(vless_url: str) -> dict:
 
 
 class XrayProxy:
-    def __init__(self, process: asyncio.subprocess.Process, config_dir: str):
+    def __init__(self, process: asyncio.subprocess.Process, config_dir: str, url: str):
+        self.url = url
         self._process = process
         self._config_dir = config_dir
+        self._log_task: asyncio.Task | None = None
+
+    def forward_logs(self) -> None:
+        """Copy xray's own warnings/errors (failed dials, handshake errors) into the bot log."""
+        async def pump() -> None:
+            async for line in self._process.stdout:
+                if text := line.decode(errors="replace").rstrip():
+                    log.warning("xray: %s", text)
+
+        self._log_task = asyncio.create_task(pump())
 
     async def stop(self) -> None:
+        if self._log_task:
+            self._log_task.cancel()
         if self._process.returncode is None:
             self._process.terminate()
             try:
@@ -79,36 +95,62 @@ class XrayProxy:
         shutil.rmtree(self._config_dir, ignore_errors=True)
 
 
-async def _port_open() -> bool:
+async def _port_open(port: int) -> bool:
     try:
-        _, writer = await asyncio.open_connection(SOCKS_HOST, SOCKS_PORT)
+        _, writer = await asyncio.open_connection(SOCKS_HOST, port)
     except OSError:
         return False
     writer.close()
     return True
 
 
-async def start_xray(vless_url: str) -> XrayProxy:
+async def start_xray(vless_url: str, socks_port: int = SOCKS_PORT) -> XrayProxy:
     binary = os.getenv("XRAY_BIN") or shutil.which("xray")
     if not binary:
         raise RuntimeError("Не найден исполняемый файл xray (задайте XRAY_BIN или установите xray в PATH)")
     config_dir = tempfile.mkdtemp(prefix="xray-")
     config_path = Path(config_dir) / "config.json"
-    config_path.write_text(json.dumps(build_config(vless_url)), encoding="utf-8")
+    config_path.write_text(json.dumps(build_config(vless_url, socks_port)), encoding="utf-8")
 
     process = await asyncio.create_subprocess_exec(
         binary, "run", "-config", str(config_path),
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        # xray writes its log to stdout; merge stderr so nothing is lost
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
-    proxy = XrayProxy(process, config_dir)
+    proxy = XrayProxy(process, config_dir, f"socks5://{SOCKS_HOST}:{socks_port}")
     for _ in range(STARTUP_TIMEOUT * 5):
         if process.returncode is not None:
-            error = (await process.stderr.read()).decode(errors="replace").strip()
+            error = (await process.stdout.read()).decode(errors="replace").strip()
             await proxy.stop()
             raise RuntimeError(f"xray завершился при запуске: {error[-500:]}")
-        if await _port_open():
-            log.info("Schedule proxy (xray) is listening on %s", SOCKS_URL)
+        if await _port_open(socks_port):
+            log.info("Schedule proxy (xray) is listening on %s", proxy.url)
+            proxy.forward_logs()
             return proxy
         await asyncio.sleep(0.2)
     await proxy.stop()
     raise RuntimeError("xray не открыл SOCKS-порт за отведённое время")
+
+
+async def check_exit(proxy_url: str = SOCKS_URL, url: str = EXIT_CHECK_URL) -> dict[str, str]:
+    """Where the proxy actually exits to the internet: {'ip': ..., 'loc': <country code>}."""
+    async with httpx.AsyncClient(proxy=proxy_url, timeout=20) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+    fields = dict(line.split("=", 1) for line in response.text.splitlines() if "=" in line)
+    return {"ip": fields.get("ip", "?"), "loc": fields.get("loc", "?")}
+
+
+async def log_exit(proxy_url: str = SOCKS_URL) -> None:
+    try:
+        exit_info = await check_exit(proxy_url)
+    except Exception as exc:
+        log.error("Schedule proxy does not work: %s: %s", type(exc).__name__, exc)
+        return
+    if exit_info["loc"] == "RU":
+        log.info("Schedule proxy exit: %s (RU)", exit_info["ip"])
+    else:
+        log.warning(
+            "Schedule proxy exits in %s (%s), but schedule-of.mirea.ru accepts only Russian IPs; "
+            "pick a VPN server with a Russian exit.", exit_info["loc"], exit_info["ip"],
+        )
