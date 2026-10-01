@@ -97,12 +97,19 @@ def queue_keyboard(
     return _markup(rows + _nav(back))
 
 
+ALL_TOPICS = "ui:topics:all"
+
+
 def subjects_keyboard(subjects: list[dict]) -> InlineKeyboardMarkup:
-    buttons = [
+    buttons = [[_button("📋 Все списки тем", ALL_TOPICS)]] + [
         [_button(f"{item['name'][:56]}" + (f" ({item['lists']})" if item["lists"] else ""), f"ui:subj:{item['id']}")]
         for item in subjects
     ]
     return _markup(buttons + [[_button("🏠 Главное меню", HOME)]])
+
+
+def after_all_topics_keyboard() -> InlineKeyboardMarkup:
+    return _markup([[_button("↩️ К предметам", TOPICS)], [_button("🏠 Главное меню", HOME)]])
 
 
 def subject_keyboard(subject_id: int, topic_lists: list[dict]) -> InlineKeyboardMarkup:

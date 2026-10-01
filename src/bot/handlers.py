@@ -195,6 +195,14 @@ async def subjects(callback: CallbackQuery, db: QueueDB) -> None:
     await screens.show(callback, await screens.subjects(db))
 
 
+@router.callback_query(F.data == keyboards.ALL_TOPICS)
+async def all_topic_lists(callback: CallbackQuery, db: QueueDB) -> None:
+    await screens.safe_answer(callback)
+    if callback.message:
+        for screen in await screens.all_topic_lists(db):
+            await screens.send(callback.message, screen)
+
+
 @router.callback_query(F.data.startswith("ui:subj:"))
 async def subject(callback: CallbackQuery, db: QueueDB) -> None:
     await screens.show(callback, await screens.subject(db, int(callback_arg(callback))))

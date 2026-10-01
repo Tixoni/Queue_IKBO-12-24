@@ -323,6 +323,19 @@ class QueueDB:
             topic_list["topics"] = list(topic_list["topics"])
         return lists
 
+    async def get_all_topic_lists(self) -> list[dict]:
+        """Every topic list with its subject name, grouped by subject."""
+        lists = await self._all(
+            "SELECT l.id, l.title, s.name AS subject, "
+            "COALESCE(array_agg(i.topic ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '{}') AS topics "
+            "FROM subject_lists l JOIN subjects s ON s.id=l.subject_id "
+            "LEFT JOIN subject_list_items i ON i.list_id=l.id "
+            "GROUP BY l.id, s.name ORDER BY s.name, l.id"
+        )
+        for topic_list in lists:
+            topic_list["topics"] = list(topic_list["topics"])
+        return lists
+
     # --- profiles -----------------------------------------------------------
 
     async def get_user_name(self, user_id: int) -> str | None:

@@ -197,6 +197,49 @@ async def subject(db: QueueDB, subject_id: int) -> Screen:
     return Screen(f"📌 <b>{escape(item['name'])}</b>\n\n{body}", keyboards.subject_keyboard(subject_id, topic_lists))
 
 
+MESSAGE_LIMIT = 3800  # Telegram allows 4096 characters per message; keep a margin for markup
+
+
+def _split_blocks(blocks: list[str], limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Pack blocks into as few messages as possible; an oversized block is split by lines."""
+    messages: list[str] = []
+    current = ""
+    for block in blocks:
+        pieces = [block]
+        if len(block) > limit:
+            pieces, piece = [], ""
+            for line in block.split("\n"):
+                if piece and len(piece) + len(line) + 1 > limit:
+                    pieces.append(piece)
+                    piece = ""
+                piece = f"{piece}\n{line}" if piece else line
+            pieces.append(piece)
+        for piece in pieces:
+            if current and len(current) + len(piece) + 2 > limit:
+                messages.append(current)
+                current = ""
+            current = f"{current}\n\n{piece}" if current else piece
+    if current:
+        messages.append(current)
+    return messages
+
+
+async def all_topic_lists(db: QueueDB) -> list[Screen]:
+    """All lists of all subjects; may take several messages, the last one carries the navigation."""
+    topic_lists = await db.get_all_topic_lists()
+    if not topic_lists:
+        return [Screen("📋 Списков тем пока нет. Создайте первый в разделе нужного предмета.",
+                       keyboards.after_all_topics_keyboard())]
+    by_subject: dict[str, list[str]] = {}
+    for item in topic_lists:
+        by_subject.setdefault(item["subject"], []).append(
+            f"<b>{escape(item['title'])}</b>\n{bulleted(item['topics']) or '—'}"
+        )
+    blocks = [f"📌 <u>{escape(subject)}</u>\n\n" + "\n\n".join(parts) for subject, parts in by_subject.items()]
+    messages = _split_blocks([f"📋 <b>Все списки тем</b> · {len(topic_lists)}"] + blocks)
+    return [Screen(text) for text in messages[:-1]] + [Screen(messages[-1], keyboards.after_all_topics_keyboard())]
+
+
 # --- administration ---------------------------------------------------------------------------
 
 
