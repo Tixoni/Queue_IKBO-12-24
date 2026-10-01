@@ -1,5 +1,10 @@
-"""Screens: build the text and keyboard for a view and show it."""
+"""Screens: each builder returns the text and inline keyboard of one view.
+
+`show` puts a screen into the message an inline button belongs to; `send` posts it as a new message
+(used by the bottom panel, whose buttons arrive as plain text messages).
+"""
 import logging
+from dataclasses import dataclass
 from html import escape
 
 from aiogram.exceptions import TelegramBadRequest
@@ -10,8 +15,14 @@ from src.bot.formatting import Lesson, bulleted, clean_text, lesson_matches_titl
 from src.config import settings
 from src.db import QueueDB
 
-TOPIC_LISTS_TEXT_LIMIT = 2600
+TOPIC_LISTS_TEXT_LIMIT = 3300
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Screen:
+    text: str
+    keyboard: InlineKeyboardMarkup | None = None
 
 
 def is_admin(user_id: int) -> bool:
@@ -30,114 +41,81 @@ async def safe_answer(callback: CallbackQuery, text: str | None = None, show_ale
         log.info("Callback answer skipped: %s", exc)
 
 
-async def render(
-    callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup, answer: bool = True
-) -> None:
+async def show(callback: CallbackQuery, screen: Screen, answer: bool = True) -> None:
     if answer:
         await safe_answer(callback)
     if not callback.message:
         return
     try:
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.message.edit_text(screen.text, reply_markup=screen.keyboard)
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc):
             raise
 
 
-async def home_text(db: QueueDB, user: User) -> str:
+async def send(message: Message, screen: Screen) -> None:
+    await message.answer(screen.text, reply_markup=screen.keyboard)
+
+
+# --- navigation --------------------------------------------------------------------
+
+
+async def home(db: QueueDB, user: User) -> Screen:
     text = (
         f"🎓 <b>Очередь на практические</b>\n\nПривет, {escape(await display_name(db, user))}!\n"
         "Выберите действие. Запись открыта на ближайшие 14 дней."
     )
     if is_admin(user.id):
         text += "\n\nВы администратор — настройки доступны по кнопке ниже."
-    return text
+    return Screen(text, keyboards.menu_keyboard(is_admin(user.id)))
 
 
-async def answer_home(message: Message, db: QueueDB, user: User) -> None:
-    await message.answer(await home_text(db, user), reply_markup=keyboards.menu_keyboard(is_admin(user.id)))
-
-
-async def show_home(callback: CallbackQuery, db: QueueDB) -> None:
-    await render(callback, await home_text(db, callback.from_user), keyboards.menu_keyboard(is_admin(callback.from_user.id)))
-
-
-async def show_my_queues(callback: CallbackQuery, db: QueueDB) -> None:
-    rows = await db.get_user_registrations(callback.from_user.id)
+async def my_queues(db: QueueDB, user: User) -> Screen:
+    rows = await db.get_user_registrations(user.id)
     if not rows:
-        await render(
-            callback,
+        return Screen(
             "У вас пока нет активных записей. Нажмите «Записаться», чтобы выбрать пару из расписания.",
             keyboards.back_keyboard(),
         )
-        return
-    await render(
-        callback,
-        "👥 <b>Ваши записи</b>\nВыберите практическую, чтобы посмотреть очередь:",
-        keyboards.queues_keyboard(rows),
-    )
+    return Screen("👥 <b>Ваши записи</b>\nВыберите практическую, чтобы посмотреть очередь:",
+                  keyboards.queues_keyboard(rows))
 
 
-async def show_schedule(callback: CallbackQuery, db: QueueDB, answer: bool = True) -> None:
-    if await db.has_schedule():
-        await render(
-            callback,
-            "📅 <b>Расписание</b>\nВыберите день недели. Верхний ряд — текущая неделя, нижний — следующая:",
-            keyboards.week_days_keyboard(),
-            answer=answer,
-        )
-    else:
-        await render(
-            callback,
+async def schedule(db: QueueDB) -> Screen:
+    if not await db.has_schedule():
+        return Screen(
             "📭 Расписание ещё не загружено — бот подтянет его автоматически. Загляните сюда чуть позже.",
             keyboards.back_keyboard(),
-            answer=answer,
         )
+    return Screen(
+        "📅 <b>Расписание</b>\nВыберите день недели. Верхний ряд — текущая неделя, нижний — следующая:",
+        keyboards.week_days_keyboard(),
+    )
 
 
-async def show_schedule_day(callback: CallbackQuery, db: QueueDB, event_date: str) -> None:
+async def schedule_day(db: QueueDB, event_date: str) -> Screen:
     lessons = await db.list_schedule_for_date(event_date)
     if not lessons:
-        await render(
-            callback,
-            f"На {pretty_date(event_date)} занятий в расписании нет.",
-            keyboards.back_keyboard(keyboards.SCHEDULE),
-        )
-        return
-    await render(
-        callback,
-        f"📅 <b>{pretty_date(event_date)}</b>\nВыберите пару, чтобы посмотреть детали и очередь:",
-        keyboards.lessons_keyboard(lessons),
-    )
+        return Screen(f"На {pretty_date(event_date)} занятий в расписании нет.",
+                      keyboards.back_keyboard(keyboards.SCHEDULE))
+    return Screen(f"📅 <b>{pretty_date(event_date)}</b>\nВыберите пару, чтобы посмотреть детали и очередь:",
+                  keyboards.lessons_keyboard(lessons))
 
 
-async def show_lesson(callback: CallbackQuery, db: QueueDB, entry_id: int) -> None:
-    lesson = await db.get_schedule_entry(entry_id)
-    if not lesson:
-        await render(callback, "Эта пара больше не найдена в расписании.", keyboards.back_keyboard(keyboards.SCHEDULE))
-        return
-    queue_id = await db.get_or_create_schedule_queue(
-        lesson["event_key"], lesson["event_date"], Lesson.from_row(lesson).title
-    )
-    await show_queue(callback, db, queue_id, back=f"ui:day:{lesson['event_date']}", lesson=lesson)
+# --- queues ----------------------------------------------------------------------------
 
 
-def _topic_lists_text(topic_lists: list[dict]) -> str:
-    parts = [f"<b>{escape(item['title'])}</b>\n{bulleted(item['topics'])}" for item in topic_lists]
-    visible: list[str] = []
-    for part in parts:
-        if len("\n\n".join([*visible, part])) > TOPIC_LISTS_TEXT_LIMIT:
-            break
-        visible.append(part)
-    text = "\n\n".join(visible)
-    if len(visible) < len(parts):
-        text += "\n\n… остальные списки скрыты"
-    return text
+async def lesson(db: QueueDB, user: User, entry_id: int) -> Screen:
+    row = await db.get_schedule_entry(entry_id)
+    if not row:
+        return Screen("Эта пара больше не найдена в расписании.", keyboards.back_keyboard(keyboards.SCHEDULE))
+    queue_id = await db.get_or_create_schedule_queue(row["event_key"], row["event_date"], Lesson.from_row(row).title)
+    return await queue(db, user, queue_id, back=f"ui:day:{row['event_date']}", lesson_row=row)
 
 
-async def _linked_lessons(db: QueueDB, deadline: dict, lesson: dict | None) -> list[dict]:
-    if lesson:
-        return [lesson]
+async def _linked_lessons(db: QueueDB, deadline: dict, lesson_row: dict | None) -> list[dict]:
+    if lesson_row:
+        return [lesson_row]
     if deadline.get("event_key"):
         return []
     # Legacy queue without an event key: match by date and fuzzy title.
@@ -145,30 +123,20 @@ async def _linked_lessons(db: QueueDB, deadline: dict, lesson: dict | None) -> l
     return [row for row in rows if lesson_matches_title(Lesson.from_row(row), deadline["title"])]
 
 
-async def show_queue(
-    callback: CallbackQuery,
-    db: QueueDB,
-    deadline_id: int,
-    answer: bool = True,
-    back: str = keyboards.MINE,
-    lesson: dict | None = None,
-) -> None:
-    user_id = callback.from_user.id
+async def queue(
+    db: QueueDB, user: User, deadline_id: int, back: str = keyboards.MINE, lesson_row: dict | None = None
+) -> Screen:
     deadline = await db.get_deadline(deadline_id)
     if not deadline:
-        await render(callback, "Эта очередь больше недоступна.", keyboards.back_keyboard(back))
-        return
+        return Screen("Эта очередь больше недоступна.", keyboards.back_keyboard(back))
 
-    if lesson is None and deadline.get("event_key"):
-        lesson = await db.get_schedule_by_event_key(deadline["event_key"])
-    if lesson and back == keyboards.MINE:
-        back = f"ui:day:{lesson['event_date']}"
+    if lesson_row is None and deadline.get("event_key"):
+        lesson_row = await db.get_schedule_by_event_key(deadline["event_key"])
+    if lesson_row and back == keyboards.MINE:
+        back = f"ui:day:{lesson_row['event_date']}"
 
-    linked = await _linked_lessons(db, deadline, lesson)
-    queue = await db.get_queue(deadline_id)
-    topic_lists = await db.get_topic_lists(deadline_id)
-    topics = await db.get_topics(deadline_id)
-
+    linked = await _linked_lessons(db, deadline, lesson_row)
+    names = await db.get_queue(deadline_id)
     if linked:
         schedule_text = "📅 <b>Пара по расписанию</b>\n" + "\n\n".join(Lesson.from_row(row).html() for row in linked)
     else:
@@ -178,20 +146,66 @@ async def show_queue(
         f"📘 <b>{escape(deadline['title'])}</b>\n"
         f"📅 {pretty_date(deadline['event_date'])}\n\n"
         f"{schedule_text}\n\n"
-        f"👥 <b>Очередь · {len(queue)} чел.</b>\n{numbered(queue) or 'Пока никого нет — можно быть первым!'}"
+        f"👥 <b>Очередь · {len(names)} чел.</b>\n{numbered(names) or 'Пока никого нет — можно быть первым!'}"
     )
-    if topic_lists:
-        text += f"\n\n📌 <b>Списки занятых тем</b>\n{_topic_lists_text(topic_lists)}"
-    if topics:
-        text += f"\n\n📌 <b>Другие занятые темы</b>\n{bulleted(topics)}"
-    if is_admin(user_id):
+    if is_admin(user.id):
         text += f"\n\n🆔 ID очереди: <code>{deadline_id}</code>"
 
-    keyboard = keyboards.queue_keyboard(
+    subject_id = await db.ensure_subject(Lesson.from_row(linked[0]).title) if linked else None
+    return Screen(text, keyboards.queue_keyboard(
         deadline_id,
-        registered=await db.is_registered(deadline_id, user_id),
+        registered=await db.is_registered(deadline_id, user.id),
         back=back,
-        can_create_topic_list=lesson is not None,
-        has_topic_lists=bool(topic_lists),
+        subject_id=subject_id,
+        is_admin=is_admin(user.id),
+    ))
+
+
+# --- topic lists ---------------------------------------------------------------------------
+
+
+async def subjects(db: QueueDB) -> Screen:
+    current = sorted({Lesson.from_row(row).title for row in await db.list_window_schedule()})
+    items = await db.list_subjects(current)
+    if not items:
+        return Screen("📌 Предметов пока нет: расписание ещё не загружено.", keyboards.back_keyboard())
+    return Screen(
+        "📌 <b>Списки тем</b>\nВыберите предмет. В скобках — сколько у него списков.",
+        keyboards.subjects_keyboard(items),
     )
-    await render(callback, text, keyboard, answer=answer)
+
+
+def _topic_lists_text(topic_lists: list[dict]) -> str:
+    parts = [f"<b>{escape(item['title'])}</b>\n{bulleted(item['topics']) or '—'}" for item in topic_lists]
+    visible: list[str] = []
+    for part in parts:
+        if len("\n\n".join([*visible, part])) > TOPIC_LISTS_TEXT_LIMIT:
+            break
+        visible.append(part)
+    text = "\n\n".join(visible)
+    if len(visible) < len(parts):
+        text += f"\n\n… и ещё списков: {len(parts) - len(visible)}"
+    return text
+
+
+async def subject(db: QueueDB, subject_id: int) -> Screen:
+    item = await db.get_subject(subject_id)
+    if not item:
+        return Screen("Предмет не найден.", keyboards.back_keyboard(keyboards.TOPICS))
+    topic_lists = await db.get_topic_lists(subject_id)
+    body = _topic_lists_text(topic_lists) if topic_lists else "Списков пока нет — создайте первый."
+    return Screen(f"📌 <b>{escape(item['name'])}</b>\n\n{body}", keyboards.subject_keyboard(subject_id, topic_lists))
+
+
+# --- administration ---------------------------------------------------------------------------
+
+
+def admin_panel() -> Screen:
+    return Screen(
+        "⚙️ <b>Администрирование</b>\n\n"
+        "Очереди на пары из расписания открываются автоматически.\n"
+        "Чтобы дописать условие к очереди, откройте её и нажмите «✏️ Изменить название».\n"
+        "Списки тем ведутся в разделе «📌 Темы» по предметам, их может создавать любой участник.\n"
+        "/admin_add_user ID_очереди TELEGRAM_ID Имя — вручную добавить студента",
+        keyboards.back_keyboard(),
+    )

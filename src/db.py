@@ -45,30 +45,25 @@ CREATE TABLE IF NOT EXISTS registrations (
 );
 CREATE INDEX IF NOT EXISTS idx_registrations_user ON registrations(user_id);
 
-CREATE TABLE IF NOT EXISTS occupied_topics (
+CREATE TABLE IF NOT EXISTS subjects (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    deadline_id BIGINT NOT NULL REFERENCES deadlines(id),
-    topic TEXT NOT NULL,
-    UNIQUE (deadline_id, topic)
+    name TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE IF NOT EXISTS topic_lists (
+CREATE TABLE IF NOT EXISTS subject_lists (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    deadline_id BIGINT NOT NULL REFERENCES deadlines(id),
-    event_key TEXT NOT NULL,
-    event_date TEXT NOT NULL,
-    subject TEXT NOT NULL,
+    subject_id BIGINT NOT NULL REFERENCES subjects(id),
     title TEXT NOT NULL,
     created_by BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (event_key, title)
+    UNIQUE (subject_id, title)
 );
 
-CREATE TABLE IF NOT EXISTS topic_list_items (
+CREATE TABLE IF NOT EXISTS subject_list_items (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    topic_list_id BIGINT NOT NULL REFERENCES topic_lists(id),
+    list_id BIGINT NOT NULL REFERENCES subject_lists(id),
     topic TEXT NOT NULL,
-    UNIQUE (topic_list_id, topic)
+    UNIQUE (list_id, topic)
 );
 
 CREATE TABLE IF NOT EXISTS profiles (
@@ -187,6 +182,12 @@ class QueueDB:
                 queue_id = await conn.fetchval("SELECT id FROM deadlines WHERE event_key=$1", event_key)
             return queue_id
 
+    async def rename_queue(self, deadline_id: int, title: str) -> bool:
+        updated = await self.pool.fetchval(
+            "UPDATE deadlines SET title=$2 WHERE id=$1 AND active RETURNING id", deadline_id, title
+        )
+        return updated is not None
+
     async def join(self, deadline_id: int, user_id: int, name: str) -> str:
         async with self.transaction() as conn:
             deadline = await conn.fetchrow("SELECT event_date,active FROM deadlines WHERE id=$1", deadline_id)
@@ -237,86 +238,86 @@ class QueueDB:
             user_id,
         )
 
-    # --- topics -------------------------------------------------------------
+    # --- subjects and topic lists -------------------------------------------
 
-    async def get_topics(self, deadline_id: int) -> list[str]:
-        rows = await self.pool.fetch(
-            "SELECT topic FROM occupied_topics WHERE deadline_id=$1 ORDER BY topic", deadline_id
+    async def list_window_schedule(self) -> list[dict]:
+        start, end = _window()
+        return await self._all(
+            f"SELECT {SCHEDULE_COLUMNS} FROM schedule WHERE event_date BETWEEN $1 AND $2", start, end
         )
-        return [row["topic"] for row in rows]
 
-    async def create_topic_list(
-        self,
-        deadline_id: int,
-        event_key: str,
-        event_date: str,
-        subject: str,
-        title: str,
-        topics: list[str],
-        created_by: int,
-    ) -> int | None:
-        """Return the new list id, DUPLICATE_TOPIC_LIST if the title is taken, None if the queue is gone."""
+    async def ensure_subject(self, name: str) -> int:
         async with self.transaction() as conn:
-            queue = await conn.fetchrow(
-                "SELECT event_key,event_date FROM deadlines WHERE id=$1 AND active", deadline_id
+            subject_id = await conn.fetchval(
+                "INSERT INTO subjects(name) VALUES($1) ON CONFLICT (name) DO NOTHING RETURNING id", name
             )
-            if not queue or queue["event_key"] != event_key or queue["event_date"] != event_date:
-                return None
-            if not in_booking_window(date.fromisoformat(event_date)):
+            return subject_id or await conn.fetchval("SELECT id FROM subjects WHERE name=$1", name)
+
+    async def list_subjects(self, current: list[str]) -> list[dict]:
+        """Subjects from the current timetable plus any subject that already has lists, with list counts."""
+        async with self.transaction() as conn:
+            await conn.executemany(
+                "INSERT INTO subjects(name) VALUES($1) ON CONFLICT (name) DO NOTHING", [(n,) for n in current]
+            )
+            rows = await conn.fetch(
+                "SELECT s.id, s.name, count(l.id) AS lists FROM subjects s "
+                "LEFT JOIN subject_lists l ON l.subject_id=s.id "
+                "GROUP BY s.id HAVING s.name = ANY($1::text[]) OR count(l.id) > 0 ORDER BY s.name",
+                current,
+            )
+            return [dict(row) for row in rows]
+
+    async def get_subject(self, subject_id: int) -> dict | None:
+        return await self._one("SELECT id,name FROM subjects WHERE id=$1", subject_id)
+
+    async def create_topic_list(self, subject_id: int, title: str, topics: list[str], created_by: int) -> int | None:
+        """Return the new list id, DUPLICATE_TOPIC_LIST if the subject already has this title,
+        None if the subject does not exist."""
+        async with self.transaction() as conn:
+            if not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM subjects WHERE id=$1)", subject_id):
                 return None
             list_id = await conn.fetchval(
-                "INSERT INTO topic_lists(deadline_id,event_key,event_date,subject,title,created_by) "
-                "VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (event_key,title) DO NOTHING RETURNING id",
-                deadline_id, event_key, event_date, subject, title, created_by,
+                "INSERT INTO subject_lists(subject_id,title,created_by) VALUES($1,$2,$3) "
+                "ON CONFLICT (subject_id,title) DO NOTHING RETURNING id",
+                subject_id, title, created_by,
             )
             if list_id is None:
                 return DUPLICATE_TOPIC_LIST
             await conn.executemany(
-                "INSERT INTO topic_list_items(topic_list_id,topic) VALUES($1,$2) ON CONFLICT DO NOTHING",
+                "INSERT INTO subject_list_items(list_id,topic) VALUES($1,$2) ON CONFLICT DO NOTHING",
                 [(list_id, topic) for topic in topics],
             )
             return list_id
 
-    async def get_topic_list(self, topic_list_id: int) -> dict | None:
-        return await self._one(
-            "SELECT l.id,l.title,l.deadline_id FROM topic_lists l "
-            "JOIN deadlines d ON d.id=l.deadline_id WHERE l.id=$1 AND d.active",
-            topic_list_id,
-        )
+    async def get_topic_list(self, list_id: int) -> dict | None:
+        return await self._one("SELECT id,title,subject_id FROM subject_lists WHERE id=$1", list_id)
 
-    async def add_topics(self, topic_list_id: int, topics: list[str]) -> int | None:
+    async def add_topics(self, list_id: int, topics: list[str]) -> int | None:
         """Append topics to a list. Returns how many were new, TOPIC_LIST_FULL if over the cap,
-        None if the list or its pair is gone."""
+        None if the list is gone."""
         async with self.transaction() as conn:
             # FOR UPDATE: two people extending the same list at once cannot exceed the cap together.
-            row = await conn.fetchrow(
-                "SELECT l.event_date FROM topic_lists l JOIN deadlines d ON d.id=l.deadline_id "
-                "WHERE l.id=$1 AND d.active FOR UPDATE OF l",
-                topic_list_id,
-            )
-            if not row or not in_booking_window(date.fromisoformat(row["event_date"])):
+            if not await conn.fetchval("SELECT id FROM subject_lists WHERE id=$1 FOR UPDATE", list_id):
                 return None
             existing = {
-                r["topic"] for r in await conn.fetch(
-                    "SELECT topic FROM topic_list_items WHERE topic_list_id=$1", topic_list_id
-                )
+                r["topic"] for r in await conn.fetch("SELECT topic FROM subject_list_items WHERE list_id=$1", list_id)
             }
-            new = [topic for topic in topics if topic not in existing]
+            new = [topic for topic in dict.fromkeys(topics) if topic not in existing]
             if len(existing) + len(new) > MAX_TOPICS_PER_LIST:
                 return TOPIC_LIST_FULL
             await conn.executemany(
-                "INSERT INTO topic_list_items(topic_list_id,topic) VALUES($1,$2) ON CONFLICT DO NOTHING",
-                [(topic_list_id, topic) for topic in new],
+                "INSERT INTO subject_list_items(list_id,topic) VALUES($1,$2) ON CONFLICT DO NOTHING",
+                [(list_id, topic) for topic in new],
             )
             return len(new)
 
-    async def get_topic_lists(self, deadline_id: int) -> list[dict]:
+    async def get_topic_lists(self, subject_id: int) -> list[dict]:
         lists = await self._all(
-            "SELECT l.id,l.title,l.subject,l.event_date,l.created_by, "
+            "SELECT l.id, l.title, l.created_by, "
             "COALESCE(array_agg(i.topic ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '{}') AS topics "
-            "FROM topic_lists l LEFT JOIN topic_list_items i ON i.topic_list_id=l.id "
-            "WHERE l.deadline_id=$1 GROUP BY l.id ORDER BY l.id",
-            deadline_id,
+            "FROM subject_lists l LEFT JOIN subject_list_items i ON i.list_id=l.id "
+            "WHERE l.subject_id=$1 GROUP BY l.id ORDER BY l.id",
+            subject_id,
         )
         for topic_list in lists:
             topic_list["topics"] = list(topic_list["topics"])

@@ -1,6 +1,6 @@
 import asyncio
 
-from src.db import DUPLICATE_TOPIC_LIST, JOINED, MAX_TOPICS_PER_LIST, TOPIC_LIST_FULL
+from src.db import JOINED
 
 from tests.conftest import day, schedule_event
 
@@ -114,15 +114,6 @@ async def test_concurrent_queue_creation_returns_one_id(db):
     assert len(set(ids)) == 1
 
 
-async def test_concurrent_add_topics_respect_cap(db):
-    _, list_id = await make_list(db, topics=())
-    half = MAX_TOPICS_PER_LIST // 2 + 1
-    batches = [[f"{n}-{i}" for i in range(half)] for n in range(2)]
-    results = await asyncio.gather(*(db.add_topics(list_id, batch) for batch in batches))
-
-    assert sorted(results) == [TOPIC_LIST_FULL, half]
-
-
 async def test_queue_order_follows_join_order(db):
     queue_id = await make_queue(db)
     for user_id in range(5):
@@ -157,62 +148,6 @@ async def test_sql_injection_is_stored_as_text(db):
 
     assert await db.get_queue(queue_id) == [evil]
     assert await db.get_user_name(1) == evil
-
-
-# --- topic lists ------------------------------------------------------------------------
-
-
-async def make_list(db, title: str = "Темы", topics=("a", "b")) -> tuple[int, int]:
-    queue_id = await make_queue(db)
-    list_id = await db.create_topic_list(queue_id, "k1", day(1), "Математика", title, list(topics), 1)
-    return queue_id, list_id
-
-
-async def test_create_topic_list(db):
-    queue_id, list_id = await make_list(db)
-
-    assert list_id > 0
-    [topic_list] = await db.get_topic_lists(queue_id)
-    assert topic_list["title"] == "Темы"
-    assert topic_list["topics"] == ["a", "b"]
-
-
-async def test_create_topic_list_rejects_duplicate_title(db):
-    queue_id, _ = await make_list(db)
-    again = await db.create_topic_list(queue_id, "k1", day(1), "Математика", "Темы", ["c"], 1)
-
-    assert again == DUPLICATE_TOPIC_LIST
-
-
-async def test_create_topic_list_rejects_mismatched_or_stale_queue(db):
-    queue_id = await make_queue(db)
-    past_queue = await make_queue(db, offset=-1, key="past")
-
-    assert await db.create_topic_list(queue_id, "other", day(1), "M", "T", ["a"], 1) is None
-    assert await db.create_topic_list(past_queue, "past", day(-1), "M", "T", ["a"], 1) is None
-
-
-async def test_add_topics_skips_existing(db):
-    queue_id, list_id = await make_list(db)
-
-    assert await db.add_topics(list_id, ["b", "c"]) == 1
-    assert (await db.get_topic_lists(queue_id))[0]["topics"] == ["a", "b", "c"]
-    assert await db.add_topics(list_id, ["a"]) == 0
-
-
-async def test_add_topics_cap_and_missing_list(db):
-    _, list_id = await make_list(db)
-
-    too_many = [f"t{i}" for i in range(MAX_TOPICS_PER_LIST)]
-    assert await db.add_topics(list_id, too_many) == TOPIC_LIST_FULL
-    assert await db.add_topics(9999, ["x"]) is None
-
-
-async def test_get_topic_list(db):
-    queue_id, list_id = await make_list(db)
-
-    assert await db.get_topic_list(list_id) == {"id": list_id, "title": "Темы", "deadline_id": queue_id}
-    assert await db.get_topic_list(9999) is None
 
 
 # --- profiles ------------------------------------------------------------------------------
