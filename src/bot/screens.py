@@ -89,7 +89,7 @@ async def show_schedule(callback: CallbackQuery, db: QueueDB, answer: bool = Tru
     else:
         await render(
             callback,
-            "📭 Расписание ещё не загружено. Нажмите «Обновить расписание» и попробуйте снова.",
+            "📭 Расписание ещё не загружено — бот подтянет его автоматически. Загляните сюда чуть позже.",
             keyboards.back_keyboard(),
             answer=answer,
         )

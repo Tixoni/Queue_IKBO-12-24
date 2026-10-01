@@ -24,7 +24,7 @@ def _nav(back: str, back_text: str = "↩️ Назад") -> list[list[InlineKey
 def menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     rows = [
         [_button("📝 Записаться", SCHEDULE), _button("👥 Мои записи", MINE)],
-        [_button("👤 Указать имя", "ui:name"), _button("🔄 Обновить расписание", "ui:refresh")],
+        [_button("👤 Указать имя", "ui:name")],
     ]
     if is_admin:
         rows.append([_button("⚙️ Администрирование", "ui:admin")])

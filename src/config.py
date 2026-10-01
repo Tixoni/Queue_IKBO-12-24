@@ -15,6 +15,7 @@ class Settings:
     group_name: str
     schedule_api_base: str
     database_path: Path
+    schedule_proxy: str | None
 
 
 def load_settings() -> Settings:
@@ -24,7 +25,8 @@ def load_settings() -> Settings:
     admins = frozenset(int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip())
     return Settings(token, admins, os.getenv("GROUP_NAME", "ИКБО-12-24"),
                     os.getenv("SCHEDULE_API_BASE", "https://schedule-of.mirea.ru").rstrip("/"),
-                    ROOT / os.getenv("DATABASE_PATH", "data/queue.sqlite3"))
+                    ROOT / os.getenv("DATABASE_PATH", "data/queue.sqlite3"),
+                    os.getenv("SCHEDULE_PROXY", "").strip() or None)
 
 
 settings = load_settings()

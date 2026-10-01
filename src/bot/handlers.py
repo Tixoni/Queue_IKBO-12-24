@@ -10,12 +10,9 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot import keyboards, screens
 from src.bot.formatting import Lesson, clean_text, pretty_date
-from src.config import settings
 from src.db import (
     DUPLICATE_TOPIC_LIST, JOINED, MAX_TOPICS_PER_LIST, TOPIC_LIST_FULL, QueueDB, in_booking_window,
 )
-from src.schedule import ScheduleClient
-from src.sync import refresh_schedule
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -102,24 +99,6 @@ async def my_queues(callback: CallbackQuery, db: QueueDB) -> None:
 @router.callback_query(F.data.startswith("ui:deadline:"))
 async def queue(callback: CallbackQuery, db: QueueDB) -> None:
     await screens.show_queue(callback, db, int(callback_arg(callback)))
-
-
-@router.callback_query(F.data == "ui:refresh")
-async def refresh(callback: CallbackQuery, db: QueueDB, schedule: ScheduleClient) -> None:
-    await callback.answer("Запрашиваю расписание МИРЭА…")
-    try:
-        count = await refresh_schedule(schedule, db, settings.group_name)
-    except Exception as exc:
-        log.warning("Manual schedule refresh failed: %s", exc)
-        await screens.render(
-            callback,
-            "Не удалось обновить расписание. Проверьте доступ к schedule-of.mirea.ru и повторите попытку.",
-            keyboards.back_keyboard(),
-            answer=False,
-        )
-        return
-    log.info("Schedule manually refreshed: %s entries", count)
-    await screens.show_schedule(callback, db, answer=False)
 
 
 # --- joining and leaving ---------------------------------------------------------

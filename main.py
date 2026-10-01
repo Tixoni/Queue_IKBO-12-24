@@ -33,7 +33,7 @@ async def main() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     db = QueueDB(settings.database_path)
     await db.initialize()
-    schedule = ScheduleClient(settings.schedule_api_base)
+    schedule = ScheduleClient(settings.schedule_api_base, settings.schedule_proxy)
 
     dp = Dispatcher(storage=MemoryStorage(), db=db, schedule=schedule)
     dp.include_router(router)

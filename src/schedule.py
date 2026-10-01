@@ -38,9 +38,9 @@ def _property(component, *names) -> str | None:
 class ScheduleClient:
     """Direct client for RTU MIREA's public schedule search and iCalendar endpoints."""
 
-    def __init__(self, base_url: str = "https://schedule-of.mirea.ru"):
+    def __init__(self, base_url: str = "https://schedule-of.mirea.ru", proxy: str | None = None):
         self.client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"), timeout=30, follow_redirects=True,
+            base_url=base_url.rstrip("/"), timeout=30, proxy=proxy, follow_redirects=True,
             headers={"Accept": "application/json, text/calendar, */*", "User-Agent": "MIREA-QueueBot/1.0"},
         )
 
