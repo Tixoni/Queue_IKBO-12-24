@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS subject_list_items (
 
 CREATE TABLE IF NOT EXISTS profiles (
     user_id BIGINT PRIMARY KEY,
-    display_name TEXT NOT NULL
+    display_name TEXT NOT NULL,
+    name_changed BOOLEAN NOT NULL DEFAULT FALSE
 );
 """
 
@@ -104,6 +105,29 @@ class QueueDB:
             async with conn.transaction():
                 await conn.execute("SELECT pg_advisory_xact_lock(724001)")
                 await conn.execute(SCHEMA)
+                # Migration: ensure name_changed column exists.
+                # If adding it to an existing table, mark old profiles as name_changed=TRUE,
+                # but keep the column default as FALSE for future inserts.
+                await conn.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'profiles' AND column_name = 'name_changed'
+                        ) THEN
+                            ALTER TABLE profiles ADD COLUMN name_changed BOOLEAN NOT NULL DEFAULT TRUE;
+                            ALTER TABLE profiles ALTER COLUMN name_changed SET DEFAULT FALSE;
+                        END IF;
+                    END $$;
+                """)
+                # Migration: backfill existing users from registrations who are not yet in profiles.
+                await conn.execute("""
+                    INSERT INTO profiles (user_id, display_name, name_changed)
+                    SELECT DISTINCT ON (user_id) user_id, display_name, FALSE
+                    FROM registrations
+                    ORDER BY user_id, created_at DESC
+                    ON CONFLICT (user_id) DO NOTHING
+                """)
 
     async def close(self):
         if self._pool is not None:
@@ -200,6 +224,12 @@ class QueueDB:
                 "ON CONFLICT (deadline_id,user_id) DO NOTHING RETURNING id",
                 deadline_id, user_id, name,
             )
+            if inserted:
+                await conn.execute(
+                    "INSERT INTO profiles(user_id, display_name, name_changed) VALUES($1, $2, FALSE) "
+                    "ON CONFLICT (user_id) DO NOTHING",
+                    user_id, name,
+                )
             return JOINED if inserted else "Вы уже записаны."
 
     async def leave(self, deadline_id: int, user_id: int) -> bool:
@@ -217,6 +247,12 @@ class QueueDB:
                 "ON CONFLICT (deadline_id,user_id) DO NOTHING RETURNING id",
                 deadline_id, user_id, name,
             )
+            if inserted:
+                await conn.execute(
+                    "INSERT INTO profiles(user_id, display_name, name_changed) VALUES($1, $2, FALSE) "
+                    "ON CONFLICT (user_id) DO NOTHING",
+                    user_id, name,
+                )
             return inserted is not None
 
     async def get_queue(self, deadline_id: int) -> list[str]:
@@ -341,9 +377,44 @@ class QueueDB:
     async def get_user_name(self, user_id: int) -> str | None:
         return await self.pool.fetchval("SELECT display_name FROM profiles WHERE user_id=$1", user_id)
 
-    async def set_user_name(self, user_id: int, name: str):
-        await self.pool.execute(
-            "INSERT INTO profiles(user_id,display_name) VALUES($1,$2) "
-            "ON CONFLICT (user_id) DO UPDATE SET display_name=excluded.display_name",
-            user_id, name,
+    async def get_profile(self, user_id: int) -> dict | None:
+        return await self._one("SELECT user_id, display_name, name_changed FROM profiles WHERE user_id=$1", user_id)
+
+    async def ensure_profile(self, user_id: int, display_name: str) -> bool:
+        """Add user to profiles if not present. Returns True if a new profile was created."""
+        inserted = await self.pool.fetchval(
+            "INSERT INTO profiles(user_id, display_name, name_changed) VALUES($1, $2, FALSE) "
+            "ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
+            user_id, display_name,
         )
+        return inserted is not None
+
+    async def can_change_name(self, user_id: int) -> bool:
+        profile = await self.get_profile(user_id)
+        if profile is None:
+            return True
+        return not profile.get("name_changed", False)
+
+    async def set_user_name(self, user_id: int, name: str, is_admin_override: bool = False) -> bool:
+        """Set user name. Users can change their name once; repeat changes are blocked unless overridden by admin."""
+        async with self.transaction() as conn:
+            profile = await conn.fetchrow("SELECT name_changed FROM profiles WHERE user_id=$1", user_id)
+            if profile and profile["name_changed"] and not is_admin_override:
+                return False
+            await conn.execute(
+                "INSERT INTO profiles(user_id, display_name, name_changed) VALUES($1, $2, TRUE) "
+                "ON CONFLICT (user_id) DO UPDATE SET display_name=excluded.display_name, name_changed=TRUE",
+                user_id, name,
+            )
+            await conn.execute(
+                "UPDATE registrations SET display_name=$2 WHERE user_id=$1",
+                user_id, name,
+            )
+            return True
+
+    async def allow_name_change(self, user_id: int) -> bool:
+        """Admin action: reset the name_changed flag so user can change name once more."""
+        updated = await self.pool.fetchval(
+            "UPDATE profiles SET name_changed=FALSE WHERE user_id=$1 RETURNING user_id", user_id
+        )
+        return updated is not None

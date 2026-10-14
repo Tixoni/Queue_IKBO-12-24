@@ -153,11 +153,59 @@ async def test_sql_injection_is_stored_as_text(db):
 # --- profiles ------------------------------------------------------------------------------
 
 
-async def test_profile_name_upsert(db):
+async def test_profile_name_repeat_change_blocked(db):
     assert await db.get_user_name(1) is None
-    await db.set_user_name(1, "Первое")
-    await db.set_user_name(1, "Второе")
+    assert await db.can_change_name(1)
+    assert await db.set_user_name(1, "Первое")
+    assert await db.get_user_name(1) == "Первое"
+    assert not await db.can_change_name(1)
+
+    # Repeat change is blocked for regular user
+    assert not await db.set_user_name(1, "Второе")
+    assert await db.get_user_name(1) == "Первое"
+
+    # Admin override allows changing
+    assert await db.set_user_name(1, "Второе", is_admin_override=True)
     assert await db.get_user_name(1) == "Второе"
+
+    # Admin can reset name_changed flag
+    assert await db.allow_name_change(1)
+    assert await db.can_change_name(1)
+    assert await db.set_user_name(1, "Третье")
+    assert await db.get_user_name(1) == "Третье"
+
+
+async def test_ensure_profile_and_backfill_migration(db):
+    # ensure_profile adds user with name_changed = False
+    assert await db.ensure_profile(100, "Телеграм Имя")
+    assert not await db.ensure_profile(100, "Другое Имя")  # idempotent, does nothing
+    profile = await db.get_profile(100)
+    assert profile["display_name"] == "Телеграм Имя"
+    assert profile["name_changed"] is False
+    assert await db.can_change_name(100)
+
+    # User can set their own name once
+    assert await db.set_user_name(100, "Реальное Имя")
+    assert await db.get_user_name(100) == "Реальное Имя"
+    assert not await db.can_change_name(100)
+
+    # Test backfill migration from registrations:
+    # Insert a registration directly without a profile
+    queue_id = await make_queue(db, key="migr_q")
+    async with db.transaction() as conn:
+        await conn.execute(
+            "INSERT INTO registrations(deadline_id, user_id, display_name) VALUES($1, $2, $3)",
+            queue_id, 200, "Студент Из Очереди"
+        )
+    # Profile does not exist yet
+    assert await db.get_profile(200) is None
+
+    # Running initialize() triggers backfill
+    await db.initialize()
+    profile200 = await db.get_profile(200)
+    assert profile200 is not None
+    assert profile200["display_name"] == "Студент Из Очереди"
+    assert profile200["name_changed"] is False
 
 
 async def test_initialize_is_idempotent(db):

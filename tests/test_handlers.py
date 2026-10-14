@@ -78,6 +78,24 @@ async def test_save_name_cleans_and_validates(db, user, state):
     assert await state.get_state() is None
 
 
+async def test_repeat_name_change_is_blocked(db, user, state):
+    await state.set_state(handlers.ProfileForm.waiting_for_name)
+    await handlers.save_name(make_message(user, "Иван Первый"), state, db)
+    assert await db.get_user_name(user.id) == "Иван Первый"
+
+    # Second attempt to submit name
+    await state.set_state(handlers.ProfileForm.waiting_for_name)
+    msg2 = make_message(user, "Иван Второй")
+    await handlers.save_name(msg2, state, db)
+    assert "повторно нельзя" in msg2.answer.await_args.args[0]
+    assert await db.get_user_name(user.id) == "Иван Первый"
+
+    # Clicking name button when name is already set
+    callback = make_callback(user, "ui:name")
+    await handlers.name_button(callback, state, db)
+    assert "повторно нельзя" in callback.message.answer.await_args.args[0]
+
+
 # --- admin -------------------------------------------------------------------------------------
 
 
@@ -96,6 +114,29 @@ async def test_admin_add_user_command(db, admin, user):
     message = make_message(admin, "/admin_add_user abc")
     await handlers.admin_add_user(message, db)
     assert "Формат" in message.answer.await_args.args[0]
+
+
+async def test_admin_set_name_and_allow_change(db, admin, user):
+    # Set initial name
+    await db.ensure_profile(user.id, "Иван")
+    await db.set_user_name(user.id, "Иван Зафиксированный")
+
+    # Regular user cannot use admin command
+    msg_user = make_message(user, f"/admin_set_name {user.id} Другое")
+    await handlers.admin_set_name(msg_user, db)
+    assert "администраторам" in msg_user.answer.await_args.args[0]
+
+    # Admin forces name change
+    msg_admin = make_message(admin, f"/admin_set_name {user.id} Новое Имя")
+    await handlers.admin_set_name(msg_admin, db)
+    assert "изменено" in msg_admin.answer.await_args.args[0]
+    assert await db.get_user_name(user.id) == "Новое Имя"
+
+    # Admin allows changing name again
+    msg_allow = make_message(admin, f"/admin_allow_name_change {user.id}")
+    await handlers.admin_allow_name_change(msg_allow, db)
+    assert "разрешено" in msg_allow.answer.await_args.args[0]
+    assert await db.can_change_name(user.id)
 
 
 async def test_admin_panel_is_hidden_from_students(user):

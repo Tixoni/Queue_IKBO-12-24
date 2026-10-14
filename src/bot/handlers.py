@@ -58,9 +58,20 @@ def parse_topics(text: str) -> list[str] | None:
     return topics if valid else None
 
 
-async def ask_for_name(message: Message, state: FSMContext) -> None:
+async def ask_for_name(message: Message, state: FSMContext, user_id: int, db: QueueDB) -> None:
+    if not await db.can_change_name(user_id):
+        current_name = await db.get_user_name(user_id) or "не указано"
+        await message.answer(
+            f"❌ Вы уже установили имя: <b>{escape(current_name)}</b>.\n\n"
+            "Менять имя повторно нельзя. Если вам нужно изменить имя, обратитесь к старосте или администратору."
+        )
+        return
     await state.set_state(ProfileForm.waiting_for_name)
-    await message.answer("Напишите имя, которое будет показано в очереди. Чтобы отменить, отправьте /cancel.")
+    await message.answer(
+        "Напишите имя и фамилию для очереди (например, <i>Иванов Иван</i>).\n\n"
+        "⚠️ <b>Внимание:</b> имя можно установить только один раз! Повторная смена будет недоступна.\n"
+        "Чтобы отменить, отправьте /cancel."
+    )
 
 
 # --- bottom panel: registered first, so it works even in the middle of a dialog ----------------
@@ -85,9 +96,10 @@ async def panel_topics(message: Message, state: FSMContext, db: QueueDB) -> None
 
 
 @router.message(F.text == keyboards.PANEL_NAME)
-async def panel_name(message: Message, state: FSMContext) -> None:
+async def panel_name(message: Message, state: FSMContext, db: QueueDB) -> None:
     await state.clear()
-    await ask_for_name(message, state)
+    if message.from_user:
+        await ask_for_name(message, state, message.from_user.id, db)
 
 
 # --- commands and navigation ---------------------------------------------------------------------
@@ -98,6 +110,8 @@ async def start(message: Message, state: FSMContext, db: QueueDB) -> None:
     if not message.from_user:
         return
     await state.clear()
+    name = clean_text(message.from_user.full_name)[:60] or "Пользователь"
+    await db.ensure_profile(message.from_user.id, name)
     await message.answer("Кнопки быстрого доступа — внизу экрана 👇", reply_markup=keyboards.panel_keyboard())
     await screens.send(message, await screens.home(db, message.from_user))
 
@@ -167,10 +181,10 @@ async def leave(callback: CallbackQuery, db: QueueDB) -> None:
 
 
 @router.callback_query(F.data == keyboards.NAME)
-async def name_button(callback: CallbackQuery, state: FSMContext) -> None:
+async def name_button(callback: CallbackQuery, state: FSMContext, db: QueueDB) -> None:
     await screens.safe_answer(callback)
-    if callback.message:
-        await ask_for_name(callback.message, state)
+    if callback.message and callback.from_user:
+        await ask_for_name(callback.message, state, callback.from_user.id, db)
 
 
 @router.message(ProfileForm.waiting_for_name, F.text)
@@ -181,9 +195,12 @@ async def save_name(message: Message, state: FSMContext, db: QueueDB) -> None:
     if len(name) not in NAME_LENGTH:
         await message.answer("Имя должно быть от 2 до 60 символов. Попробуйте ещё раз или отправьте /cancel.")
         return
-    await db.set_user_name(message.from_user.id, name)
+    saved = await db.set_user_name(message.from_user.id, name)
     await state.clear()
-    await message.answer(f"✅ Имя для очереди сохранено: <b>{escape(name)}</b>")
+    if not saved:
+        await message.answer("❌ Менять имя повторно нельзя. По вопросам изменения обратитесь к администратору.")
+    else:
+        await message.answer(f"✅ Имя для очереди сохранено: <b>{escape(name)}</b>\nПовторная смена имени заблокирована.")
     await screens.send(message, await screens.home(db, message.from_user))
 
 
@@ -360,3 +377,40 @@ async def admin_add_user(message: Message, db: QueueDB) -> None:
         await message.answer("Формат: /admin_add_user ID_очереди TELEGRAM_ID Имя")
         return
     await message.answer("✅ Пользователь добавлен." if added else "Очередь не найдена или пользователь уже записан.")
+
+
+@router.message(Command("admin_set_name"))
+async def admin_set_name(message: Message, db: QueueDB) -> None:
+    if not message.from_user or not screens.is_admin(message.from_user.id):
+        await message.answer("Команда доступна администраторам.")
+        return
+    try:
+        _, user_id_str, name = message.text.split(maxsplit=2)
+        user_id = int(user_id_str)
+        cleaned_name = clean_text(name)[:60]
+    except (ValueError, AttributeError):
+        await message.answer("Формат: /admin_set_name TELEGRAM_ID Имя")
+        return
+    if len(cleaned_name) not in NAME_LENGTH:
+        await message.answer("Имя должно быть от 2 до 60 символов.")
+        return
+    await db.set_user_name(user_id, cleaned_name, is_admin_override=True)
+    await message.answer(f"✅ Имя пользователя <code>{user_id}</code> изменено на <b>{escape(cleaned_name)}</b>.")
+
+
+@router.message(Command("admin_allow_name_change"))
+async def admin_allow_name_change(message: Message, db: QueueDB) -> None:
+    if not message.from_user or not screens.is_admin(message.from_user.id):
+        await message.answer("Команда доступна администраторам.")
+        return
+    try:
+        _, user_id_str = message.text.split(maxsplit=1)
+        user_id = int(user_id_str)
+    except (ValueError, AttributeError):
+        await message.answer("Формат: /admin_allow_name_change TELEGRAM_ID")
+        return
+    ok = await db.allow_name_change(user_id)
+    if ok:
+        await message.answer(f"✅ Пользователю <code>{user_id}</code> разрешено повторно изменить имя.")
+    else:
+        await message.answer(f"❌ Пользователь <code>{user_id}</code> не найден в базе данных.")
