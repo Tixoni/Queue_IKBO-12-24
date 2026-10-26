@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User
 
 from src.bot import keyboards
-from src.bot.formatting import Lesson, bulleted, clean_text, lesson_matches_title, numbered, pretty_date
+from src.bot.formatting import Lesson, clean_text, lesson_matches_title, numbered, pretty_date
 from src.config import settings
 from src.db import QueueDB
 
@@ -184,8 +184,22 @@ async def pick_subject(db: QueueDB) -> Screen:
                   keyboards.pick_subject_keyboard(await db.list_subjects(current)))
 
 
-def _topic_lists_text(topic_lists: list[dict]) -> str:
-    parts = [f"<b>{escape(item['title'])}</b>\n{bulleted(item['topics']) or '—'}" for item in topic_lists]
+def _items_text(items: list[dict], numbered_items: bool = False) -> str:
+    lines = []
+    for number, item in enumerate(items, 1):
+        owner = f" — <i>{escape(item['owner'])}</i>" if item.get("owner") else ""
+        prefix = f"{number}." if numbered_items else "•"
+        lines.append(f"{prefix} {escape(item['topic'])}{owner}")
+    return "\n".join(lines) or "— пока никто не занял тему"
+
+
+def _list_block(topic_list: dict, show_id: bool = False) -> str:
+    list_id = f" · 🆔 <code>{topic_list['id']}</code>" if show_id else ""
+    return f"<b>{escape(topic_list['title'])}</b>{list_id}\n{_items_text(topic_list['items'])}"
+
+
+def _topic_lists_text(topic_lists: list[dict], show_ids: bool = False) -> str:
+    parts = [_list_block(item, show_ids) for item in topic_lists]
     visible: list[str] = []
     for part in parts:
         if len("\n\n".join([*visible, part])) > TOPIC_LISTS_TEXT_LIMIT:
@@ -197,13 +211,29 @@ def _topic_lists_text(topic_lists: list[dict]) -> str:
     return text
 
 
-async def subject(db: QueueDB, subject_id: int) -> Screen:
+async def subject(db: QueueDB, subject_id: int, user: User) -> Screen:
     item = await db.get_subject(subject_id)
     if not item:
         return Screen("Предмет не найден.", keyboards.back_keyboard(keyboards.TOPICS))
+    admin = is_admin(user.id)
     topic_lists = await db.get_topic_lists(subject_id)
-    body = _topic_lists_text(topic_lists) if topic_lists else "Списков пока нет — создайте первый."
-    return Screen(f"📌 <b>{escape(item['name'])}</b>\n\n{body}", keyboards.subject_keyboard(subject_id, topic_lists))
+    body = _topic_lists_text(topic_lists, show_ids=admin) if topic_lists else "Списков пока нет — создайте первый."
+    hint = "\n\n✋ Каждый может занять в списке одну тему." if topic_lists else ""
+    return Screen(f"📌 <b>{escape(item['name'])}</b>\n\n{body}{hint}",
+                  keyboards.subject_keyboard(subject_id, topic_lists, admin))
+
+
+async def edit_topic_list(db: QueueDB, list_id: int) -> Screen:
+    """Admin view of one list: rename it or pick a topic to edit/delete."""
+    topic_list = await db.get_topic_list_items(list_id)
+    if not topic_list:
+        return Screen("Список больше не найден.", keyboards.back_keyboard(keyboards.TOPICS))
+    text = (
+        f"⚙️ <b>{escape(topic_list['title'])}</b> · {escape(topic_list['subject'])} · 🆔 <code>{list_id}</code>\n\n"
+        f"{_items_text(topic_list['items'], numbered_items=True)}\n\n"
+        "Нажмите номер темы, чтобы изменить или удалить её."
+    )
+    return Screen(text, keyboards.edit_topic_list_keyboard(topic_list))
 
 
 MESSAGE_LIMIT = 3800  # Telegram allows 4096 characters per message; keep a margin for markup
@@ -241,9 +271,7 @@ async def all_topic_lists(db: QueueDB) -> list[Screen]:
                        keyboards.after_all_topics_keyboard())]
     by_subject: dict[str, list[str]] = {}
     for item in topic_lists:
-        by_subject.setdefault(item["subject"], []).append(
-            f"<b>{escape(item['title'])}</b>\n{bulleted(item['topics']) or '—'}"
-        )
+        by_subject.setdefault(item["subject"], []).append(_list_block(item))
     blocks = [f"📌 <u>{escape(subject)}</u>\n\n" + "\n\n".join(parts) for subject, parts in by_subject.items()]
     messages = _split_blocks([f"📋 <b>Все списки тем</b> · {len(topic_lists)}"] + blocks)
     return [Screen(text) for text in messages[:-1]] + [Screen(messages[-1], keyboards.after_all_topics_keyboard())]
@@ -257,10 +285,12 @@ def admin_panel() -> Screen:
         "⚙️ <b>Администрирование</b>\n\n"
         "Очереди на пары из расписания открываются автоматически.\n"
         "Чтобы дописать условие к очереди, откройте её и нажмите «✏️ Изменить название».\n"
-        "Списки тем ведутся в разделе «📌 Темы» по предметам, их может создавать любой участник.\n\n"
+        "Списки тем ведутся в разделе «📌 Темы» по предметам, их может создавать любой участник; "
+        "каждый занимает в списке одну тему. Название списка и темы правятся кнопкой «⚙️ Редактировать».\n\n"
         "<b>Команды:</b>\n"
         "• /admin_add_user ID_очереди TELEGRAM_ID Имя — добавить студента в очередь\n"
         "• /admin_set_name TELEGRAM_ID Имя — принудительно задать имя студенту\n"
-        "• /admin_allow_name_change TELEGRAM_ID — разрешить повторную смену имени",
+        "• /admin_allow_name_change TELEGRAM_ID — разрешить повторную смену имени\n"
+        "• /import_topics ID_списка ссылка — заполнить список из Google Таблицы (ФИО | тема)",
         keyboards.back_keyboard(),
     )

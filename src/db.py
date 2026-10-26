@@ -1,5 +1,6 @@
 """PostgreSQL storage (asyncpg). Uniqueness constraints and transactions keep queues consistent
 when many people press buttons at once or several bot instances share one database."""
+import json
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 
@@ -9,6 +10,12 @@ BOOKING_DAYS = 14
 JOINED = "Вы добавлены в очередь."
 DUPLICATE_TOPIC_LIST = -1
 TOPIC_LIST_FULL = -1
+# take_topic results
+TAKEN = "taken"
+ALREADY_HAS_TOPIC = "already_has_topic"
+TOPIC_BUSY = "topic_busy"
+TOPIC_LIST_FULL_STATUS = "list_full"
+LIST_MISSING = "list_missing"
 MAX_TOPICS_PER_LIST = 60
 
 SCHEDULE_COLUMNS = "id,event_key,event_date,starts,title,raw"
@@ -65,6 +72,10 @@ CREATE TABLE IF NOT EXISTS subject_list_items (
     topic TEXT NOT NULL,
     UNIQUE (list_id, topic)
 );
+-- Who took the topic: one topic per user in a list. Imported rows may have only a name.
+ALTER TABLE subject_list_items ADD COLUMN IF NOT EXISTS user_id BIGINT;
+ALTER TABLE subject_list_items ADD COLUMN IF NOT EXISTS owner_name TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subject_list_items_owner ON subject_list_items(list_id, user_id);
 
 CREATE TABLE IF NOT EXISTS profiles (
     user_id BIGINT PRIMARY KEY,
@@ -309,7 +320,7 @@ class QueueDB:
     async def get_subject(self, subject_id: int) -> dict | None:
         return await self._one("SELECT id,name FROM subjects WHERE id=$1", subject_id)
 
-    async def create_topic_list(self, subject_id: int, title: str, topics: list[str], created_by: int) -> int | None:
+    async def create_topic_list(self, subject_id: int, title: str, created_by: int) -> int | None:
         """Return the new list id, DUPLICATE_TOPIC_LIST if the subject already has this title,
         None if the subject does not exist."""
         async with self.transaction() as conn:
@@ -320,60 +331,127 @@ class QueueDB:
                 "ON CONFLICT (subject_id,title) DO NOTHING RETURNING id",
                 subject_id, title, created_by,
             )
-            if list_id is None:
-                return DUPLICATE_TOPIC_LIST
-            await conn.executemany(
-                "INSERT INTO subject_list_items(list_id,topic) VALUES($1,$2) ON CONFLICT DO NOTHING",
-                [(list_id, topic) for topic in topics],
-            )
-            return list_id
+            return DUPLICATE_TOPIC_LIST if list_id is None else list_id
 
     async def get_topic_list(self, list_id: int) -> dict | None:
         return await self._one("SELECT id,title,subject_id FROM subject_lists WHERE id=$1", list_id)
 
-    async def add_topics(self, list_id: int, topics: list[str]) -> int | None:
-        """Append topics to a list. Returns how many were new, TOPIC_LIST_FULL if over the cap,
-        None if the list is gone."""
+    async def rename_topic_list(self, list_id: int, title: str) -> str:
+        """'ok', 'missing' or 'duplicate' (the subject already has a list with this title)."""
+        try:
+            updated = await self.pool.fetchval(
+                "UPDATE subject_lists SET title=$2 WHERE id=$1 RETURNING id", list_id, title
+            )
+        except asyncpg.UniqueViolationError:
+            return "duplicate"
+        return "ok" if updated else "missing"
+
+    async def get_user_topic(self, list_id: int, user_id: int) -> str | None:
+        return await self.pool.fetchval(
+            "SELECT topic FROM subject_list_items WHERE list_id=$1 AND user_id=$2", list_id, user_id
+        )
+
+    async def take_topic(self, list_id: int, user_id: int, owner_name: str, topic: str) -> str:
+        """One topic per user per list. Returns TAKEN, ALREADY_HAS_TOPIC, TOPIC_BUSY, TOPIC_LIST_FULL_STATUS
+        or LIST_MISSING."""
         async with self.transaction() as conn:
-            # FOR UPDATE: two people extending the same list at once cannot exceed the cap together.
+            # FOR UPDATE: concurrent takes in one list cannot exceed the cap or give one user two topics.
+            if not await conn.fetchval("SELECT id FROM subject_lists WHERE id=$1 FOR UPDATE", list_id):
+                return LIST_MISSING
+            if await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM subject_list_items WHERE list_id=$1 AND user_id=$2)", list_id, user_id
+            ):
+                return ALREADY_HAS_TOPIC
+            if await conn.fetchval("SELECT count(*) FROM subject_list_items WHERE list_id=$1", list_id) \
+                    >= MAX_TOPICS_PER_LIST:
+                return TOPIC_LIST_FULL_STATUS
+            inserted = await conn.fetchval(
+                "INSERT INTO subject_list_items(list_id,topic,user_id,owner_name) VALUES($1,$2,$3,$4) "
+                "ON CONFLICT (list_id,topic) DO NOTHING RETURNING id",
+                list_id, topic, user_id, owner_name,
+            )
+            return TAKEN if inserted else TOPIC_BUSY
+
+    async def get_topic_item(self, item_id: int) -> dict | None:
+        return await self._one(
+            "SELECT i.id, i.topic, i.owner_name, i.list_id, l.title AS list_title, l.subject_id "
+            "FROM subject_list_items i JOIN subject_lists l ON l.id=i.list_id WHERE i.id=$1",
+            item_id,
+        )
+
+    async def edit_topic(self, item_id: int, topic: str) -> str:
+        """Admin: change a topic's text. 'ok', 'missing' or 'duplicate'."""
+        try:
+            updated = await self.pool.fetchval(
+                "UPDATE subject_list_items SET topic=$2 WHERE id=$1 RETURNING id", item_id, topic
+            )
+        except asyncpg.UniqueViolationError:
+            return "duplicate"
+        return "ok" if updated else "missing"
+
+    async def delete_topic(self, item_id: int) -> bool:
+        return await self.pool.fetchval("DELETE FROM subject_list_items WHERE id=$1 RETURNING id", item_id) is not None
+
+    async def import_topics(self, list_id: int, rows: list[tuple[str, str]]) -> tuple[int, int] | None:
+        """Admin: add (owner name, topic) pairs. A row is linked to a bot user whose profile name matches
+        exactly. Rows with a taken topic, an owner who already has a topic, or over the cap are skipped.
+        Returns (added, skipped) or None if the list is gone."""
+        async with self.transaction() as conn:
             if not await conn.fetchval("SELECT id FROM subject_lists WHERE id=$1 FOR UPDATE", list_id):
                 return None
-            existing = {
-                r["topic"] for r in await conn.fetch("SELECT topic FROM subject_list_items WHERE list_id=$1", list_id)
-            }
-            new = [topic for topic in dict.fromkeys(topics) if topic not in existing]
-            if len(existing) + len(new) > MAX_TOPICS_PER_LIST:
-                return TOPIC_LIST_FULL
-            await conn.executemany(
-                "INSERT INTO subject_list_items(list_id,topic) VALUES($1,$2) ON CONFLICT DO NOTHING",
-                [(list_id, topic) for topic in new],
+            existing = await conn.fetch(
+                "SELECT topic, user_id, lower(owner_name) AS owner FROM subject_list_items WHERE list_id=$1", list_id
             )
-            return len(new)
+            topics = {r["topic"] for r in existing}
+            owners = {r["owner"] for r in existing if r["owner"]}
+            users = {r["user_id"] for r in existing if r["user_id"] is not None}
+            count, added = len(existing), 0
+            for owner_name, topic in rows:
+                user_id = await conn.fetchval(
+                    "SELECT user_id FROM profiles WHERE lower(display_name)=lower($1) "
+                    "AND (SELECT count(*) FROM profiles WHERE lower(display_name)=lower($1)) = 1",
+                    owner_name,
+                )
+                if topic in topics or owner_name.lower() in owners or (user_id is not None and user_id in users) \
+                        or count >= MAX_TOPICS_PER_LIST:
+                    continue
+                await conn.execute(
+                    "INSERT INTO subject_list_items(list_id,topic,user_id,owner_name) VALUES($1,$2,$3,$4)",
+                    list_id, topic, user_id, owner_name,
+                )
+                topics.add(topic)
+                owners.add(owner_name.lower())
+                if user_id is not None:
+                    users.add(user_id)
+                count += 1
+                added += 1
+            return added, len(rows) - added
 
-    async def get_topic_lists(self, subject_id: int) -> list[dict]:
+    async def _lists_with_items(self, where: str, *args) -> list[dict]:
         lists = await self._all(
-            "SELECT l.id, l.title, l.created_by, "
-            "COALESCE(array_agg(i.topic ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '{}') AS topics "
-            "FROM subject_lists l LEFT JOIN subject_list_items i ON i.list_id=l.id "
-            "WHERE l.subject_id=$1 GROUP BY l.id ORDER BY l.id",
-            subject_id,
+            "SELECT l.id, l.title, l.subject_id, s.name AS subject, "
+            "COALESCE(json_agg(json_build_object('id', i.id, 'topic', i.topic, 'owner', i.owner_name) "
+            "ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '[]')::text AS items "
+            "FROM subject_lists l JOIN subjects s ON s.id=l.subject_id "
+            "LEFT JOIN subject_list_items i ON i.list_id=l.id "
+            f"{where} GROUP BY l.id, s.name ORDER BY s.name, l.id",
+            *args,
         )
         for topic_list in lists:
-            topic_list["topics"] = list(topic_list["topics"])
+            topic_list["items"] = json.loads(topic_list["items"])
         return lists
+
+    async def get_topic_lists(self, subject_id: int) -> list[dict]:
+        """Lists of a subject; each has 'items': [{'id', 'topic', 'owner'}]."""
+        return await self._lists_with_items("WHERE l.subject_id=$1", subject_id)
+
+    async def get_topic_list_items(self, list_id: int) -> dict | None:
+        lists = await self._lists_with_items("WHERE l.id=$1", list_id)
+        return lists[0] if lists else None
 
     async def get_all_topic_lists(self) -> list[dict]:
         """Every topic list with its subject name, grouped by subject."""
-        lists = await self._all(
-            "SELECT l.id, l.title, s.name AS subject, "
-            "COALESCE(array_agg(i.topic ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '{}') AS topics "
-            "FROM subject_lists l JOIN subjects s ON s.id=l.subject_id "
-            "LEFT JOIN subject_list_items i ON i.list_id=l.id "
-            "GROUP BY l.id, s.name ORDER BY s.name, l.id"
-        )
-        for topic_list in lists:
-            topic_list["topics"] = list(topic_list["topics"])
-        return lists
+        return await self._lists_with_items("")
 
     # --- profiles -----------------------------------------------------------
 

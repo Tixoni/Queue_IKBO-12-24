@@ -124,10 +124,31 @@ def after_all_topics_keyboard() -> InlineKeyboardMarkup:
     return _markup([[_button("↩️ К спискам тем", TOPICS)], [_button("🏠 Главное меню", HOME)]])
 
 
-def subject_keyboard(subject_id: int, topic_lists: list[dict]) -> InlineKeyboardMarkup:
+def subject_keyboard(subject_id: int, topic_lists: list[dict], is_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [[_button("➕ Новый список", f"ui:tl:new:{subject_id}")]]
-    rows += [[_button(f"✏️ Дополнить: {item['title'][:44]}", f"ui:tl:add:{item['id']}")] for item in topic_lists]
+    for item in topic_lists:
+        rows.append([_button(f"✋ Занять тему: {item['title'][:44]}", f"ui:tl:take:{item['id']}")])
+        if is_admin:
+            rows.append([_button(f"⚙️ Редактировать: {item['title'][:40]}", f"ui:tl:edit:{item['id']}")])
     return _markup(rows + _nav(TOPICS, "↩️ К спискам тем"))
+
+
+def edit_topic_list_keyboard(topic_list: dict) -> InlineKeyboardMarkup:
+    numbers = [_button(f"✏️ {n}", f"ui:ti:edit:{item['id']}") for n, item in enumerate(topic_list["items"], 1)]
+    rows = [[_button("✏️ Название списка", f"ui:tl:rename:{topic_list['id']}")]]
+    rows += [numbers[i:i + 5] for i in range(0, len(numbers), 5)]
+    return _markup(rows + _nav(f"ui:subj:{topic_list['subject_id']}", "↩️ К предмету"))
+
+
+def take_topic_keyboard(list_id: int, subject_id: int) -> InlineKeyboardMarkup:
+    return _markup([
+        [_button("✋ Занять тему", f"ui:tl:take:{list_id}")],
+        [_button("↩️ К спискам тем", f"ui:subj:{subject_id}")],
+    ])
+
+
+def to_edit_list_keyboard(list_id: int) -> InlineKeyboardMarkup:
+    return _markup([[_button("↩️ К редактированию списка", f"ui:tl:edit:{list_id}")]])
 
 
 def to_subject_keyboard(subject_id: int) -> InlineKeyboardMarkup:

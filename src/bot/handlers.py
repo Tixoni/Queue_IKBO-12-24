@@ -9,7 +9,13 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot import keyboards, screens
 from src.bot.formatting import clean_text
-from src.db import DUPLICATE_TOPIC_LIST, JOINED, MAX_TOPICS_PER_LIST, TOPIC_LIST_FULL, QueueDB
+import httpx
+
+from src import topics_import
+from src.db import (
+    ALREADY_HAS_TOPIC, DUPLICATE_TOPIC_LIST, JOINED, LIST_MISSING, MAX_TOPICS_PER_LIST, TAKEN, TOPIC_BUSY,
+    TOPIC_LIST_FULL_STATUS, QueueDB,
+)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -17,14 +23,7 @@ router = Router()
 NAME_LENGTH = range(2, 61)
 QUEUE_TITLE_LENGTH = range(2, 201)
 TOPIC_LIST_TITLE_LENGTH = range(2, 81)
-MAX_TOPICS = 25
-MAX_TOPIC_LENGTH = 80
-MAX_TOPICS_TOTAL_LENGTH = 1800
-
-TOPICS_FORMAT_HINT = (
-    "Укажите от 1 до 25 тем без повторов, каждая не длиннее 80 символов (до 1800 символов суммарно), "
-    "по одной на строке. Или отправьте /cancel."
-)
+TOPIC_LENGTH = range(2, 81)
 
 
 class ProfileForm(StatesGroup):
@@ -33,8 +32,12 @@ class ProfileForm(StatesGroup):
 
 class TopicListForm(StatesGroup):
     waiting_for_title = State()
-    waiting_for_topics = State()
-    waiting_for_more_topics = State()
+    waiting_for_my_topic = State()
+
+
+class AdminTopicForm(StatesGroup):
+    waiting_for_list_title = State()
+    waiting_for_topic_text = State()
 
 
 class RenameForm(StatesGroup):
@@ -44,18 +47,6 @@ class RenameForm(StatesGroup):
 def callback_arg(callback: CallbackQuery) -> str:
     """Last ':'-separated part of the callback data (an id or an ISO date)."""
     return callback.data.rsplit(":", 1)[1]
-
-
-def parse_topics(text: str) -> list[str] | None:
-    """Topics, one per line; None if empty, duplicated or over any limit."""
-    topics = [clean_text(line) for line in text.splitlines() if clean_text(line)]
-    valid = (
-        0 < len(topics) <= MAX_TOPICS
-        and len(set(topics)) == len(topics)
-        and all(len(topic) <= MAX_TOPIC_LENGTH for topic in topics)
-        and sum(map(len, topics)) <= MAX_TOPICS_TOTAL_LENGTH
-    )
-    return topics if valid else None
 
 
 async def ask_for_name(message: Message, state: FSMContext, user_id: int, db: QueueDB) -> None:
@@ -227,7 +218,7 @@ async def all_topic_lists(callback: CallbackQuery, db: QueueDB) -> None:
 
 @router.callback_query(F.data.startswith("ui:subj:"))
 async def subject(callback: CallbackQuery, db: QueueDB) -> None:
-    await screens.show(callback, await screens.subject(db, int(callback_arg(callback))))
+    await screens.show(callback, await screens.subject(db, int(callback_arg(callback)), callback.from_user))
 
 
 @router.callback_query(F.data.startswith("ui:tl:new:"))
@@ -248,75 +239,203 @@ async def start_topic_list(callback: CallbackQuery, state: FSMContext, db: Queue
 
 
 @router.message(TopicListForm.waiting_for_title, F.text)
-async def topic_list_title(message: Message, state: FSMContext) -> None:
+async def topic_list_title(message: Message, state: FSMContext, db: QueueDB) -> None:
     title = clean_text(message.text)
     if len(title) not in TOPIC_LIST_TITLE_LENGTH:
         await message.answer("Название списка должно быть от 2 до 80 символов. Попробуйте ещё раз или отправьте /cancel.")
         return
-    await state.update_data(list_title=title)
-    await state.set_state(TopicListForm.waiting_for_topics)
-    await message.answer("Теперь отправьте занятые темы одним сообщением, по одной теме на строке. Для отмены — /cancel.")
-
-
-@router.message(TopicListForm.waiting_for_topics, F.text)
-async def topic_list_topics(message: Message, state: FSMContext, db: QueueDB) -> None:
-    topics = parse_topics(message.text)
-    if topics is None:
-        await message.answer(TOPICS_FORMAT_HINT)
-        return
     data = await state.get_data()
-    list_id = await db.create_topic_list(data["subject_id"], data["list_title"], topics, message.from_user.id)
+    list_id = await db.create_topic_list(data["subject_id"], title, message.from_user.id)
     if list_id is None:
         await state.clear()
         await message.answer("Не удалось создать список: предмет больше не найден.")
     elif list_id == DUPLICATE_TOPIC_LIST:
-        await state.set_state(TopicListForm.waiting_for_title)
         await message.answer("У этого предмета уже есть список с таким названием. Введите другое название или /cancel.")
     else:
         await state.clear()
         await message.answer(
-            f"✅ Список «{escape(data['list_title'])}» создан, тем: {len(topics)}.",
-            reply_markup=keyboards.to_subject_keyboard(data["subject_id"]),
+            f"✅ Список «{escape(title)}» создан. Теперь каждый может занять в нём одну тему.",
+            reply_markup=keyboards.take_topic_keyboard(list_id, data["subject_id"]),
         )
 
 
-@router.callback_query(F.data.startswith("ui:tl:add:"))
-async def start_adding_topics(callback: CallbackQuery, state: FSMContext, db: QueueDB) -> None:
+@router.callback_query(F.data.startswith("ui:tl:take:"))
+async def start_taking_topic(callback: CallbackQuery, state: FSMContext, db: QueueDB) -> None:
+    topic_list = await db.get_topic_list(int(callback_arg(callback)))
+    if not topic_list:
+        await screens.safe_answer(callback, "Список больше не найден.", show_alert=True)
+        return
+    mine = await db.get_user_topic(topic_list["id"], callback.from_user.id)
+    if mine:
+        await screens.safe_answer(
+            callback, f"Вы уже заняли тему «{mine}» в этом списке. Изменить её может админ.", show_alert=True
+        )
+        return
+    await state.clear()
+    await state.update_data(list_id=topic_list["id"], subject_id=topic_list["subject_id"])
+    await state.set_state(TopicListForm.waiting_for_my_topic)
+    await screens.safe_answer(callback)
+    if callback.message:
+        await callback.message.answer(
+            f"Список «{escape(topic_list['title'])}».\n"
+            "Напишите одной строкой тему, которую берёте (можно занять только одну). Для отмены — /cancel."
+        )
+
+
+@router.message(TopicListForm.waiting_for_my_topic, F.text)
+async def take_topic(message: Message, state: FSMContext, db: QueueDB) -> None:
+    topic = clean_text(message.text)
+    if "\n" in message.text.strip() or len(topic) not in TOPIC_LENGTH:
+        await message.answer("Нужна одна тема одной строкой, от 2 до 80 символов. Попробуйте ещё раз или /cancel.")
+        return
+    data = await state.get_data()
+    result = await db.take_topic(
+        data["list_id"], message.from_user.id, await screens.display_name(db, message.from_user), topic
+    )
+    if result == TOPIC_BUSY:
+        await message.answer("Эту тему уже заняли. Выберите другую или отправьте /cancel.")
+        return
+    await state.clear()
+    replies = {
+        TAKEN: f"✅ Тема «{escape(topic)}» закреплена за вами.",
+        ALREADY_HAS_TOPIC: "Вы уже заняли тему в этом списке. Изменить её может админ.",
+        TOPIC_LIST_FULL_STATUS: f"В списке уже {MAX_TOPICS_PER_LIST} тем — больше добавить нельзя.",
+        LIST_MISSING: "Список больше не найден.",
+    }
+    await message.answer(replies[result], reply_markup=keyboards.to_subject_keyboard(data["subject_id"]))
+
+
+# --- topic lists: admin editing ----------------------------------------------------------------
+
+
+async def _admin_only(callback: CallbackQuery) -> bool:
+    if screens.is_admin(callback.from_user.id):
+        return True
+    await screens.safe_answer(callback, "Нет доступа", show_alert=True)
+    return False
+
+
+@router.callback_query(F.data.startswith("ui:tl:edit:"))
+async def edit_topic_list(callback: CallbackQuery, db: QueueDB) -> None:
+    if await _admin_only(callback):
+        await screens.show(callback, await screens.edit_topic_list(db, int(callback_arg(callback))))
+
+
+@router.callback_query(F.data.startswith("ui:tl:rename:"))
+async def start_list_rename(callback: CallbackQuery, state: FSMContext, db: QueueDB) -> None:
+    if not await _admin_only(callback):
+        return
     topic_list = await db.get_topic_list(int(callback_arg(callback)))
     if not topic_list:
         await screens.safe_answer(callback, "Список больше не найден.", show_alert=True)
         return
     await state.clear()
-    await state.update_data(list_id=topic_list["id"], subject_id=topic_list["subject_id"])
-    await state.set_state(TopicListForm.waiting_for_more_topics)
+    await state.update_data(list_id=topic_list["id"])
+    await state.set_state(AdminTopicForm.waiting_for_list_title)
     await screens.safe_answer(callback)
     if callback.message:
         await callback.message.answer(
-            f"Добавляем темы в список «{escape(topic_list['title'])}».\n"
-            "Отправьте новые темы одним сообщением, по одной на строке. Для отмены — /cancel."
+            f"Сейчас список называется:\n<code>{escape(topic_list['title'])}</code>\n\n"
+            "Отправьте новое название. Для отмены — /cancel."
         )
 
 
-@router.message(TopicListForm.waiting_for_more_topics, F.text)
-async def add_topics(message: Message, state: FSMContext, db: QueueDB) -> None:
-    topics = parse_topics(message.text)
-    if topics is None:
-        await message.answer(TOPICS_FORMAT_HINT)
+@router.message(AdminTopicForm.waiting_for_list_title, F.text)
+async def save_list_rename(message: Message, state: FSMContext, db: QueueDB) -> None:
+    if not screens.is_admin(message.from_user.id):
+        await state.clear()
+        return
+    title = clean_text(message.text)
+    if len(title) not in TOPIC_LIST_TITLE_LENGTH:
+        await message.answer("Название должно быть от 2 до 80 символов. Попробуйте ещё раз или /cancel.")
         return
     data = await state.get_data()
-    added = await db.add_topics(data["list_id"], topics)
-    if added is None:
-        await state.clear()
-        await message.answer("Не удалось добавить темы: список больше не найден.")
-        return
-    if added == TOPIC_LIST_FULL:
-        await message.answer(f"В списке может быть не больше {MAX_TOPICS_PER_LIST} тем. Отправьте меньше тем или /cancel.")
+    result = await db.rename_topic_list(data["list_id"], title)
+    if result == "duplicate":
+        await message.answer("У предмета уже есть список с таким названием. Введите другое или /cancel.")
         return
     await state.clear()
-    note = f"✅ Добавлено тем: {added}." if added else "Все эти темы уже есть в списке."
-    if 0 < added < len(topics):
-        note += f" Уже были в списке: {len(topics) - added}."
-    await message.answer(note, reply_markup=keyboards.to_subject_keyboard(data["subject_id"]))
+    text = f"✅ Список переименован: <b>{escape(title)}</b>" if result == "ok" else "Список больше не найден."
+    await message.answer(text, reply_markup=keyboards.to_edit_list_keyboard(data["list_id"]))
+
+
+@router.callback_query(F.data.startswith("ui:ti:edit:"))
+async def start_topic_edit(callback: CallbackQuery, state: FSMContext, db: QueueDB) -> None:
+    if not await _admin_only(callback):
+        return
+    item = await db.get_topic_item(int(callback_arg(callback)))
+    if not item:
+        await screens.safe_answer(callback, "Тема больше не найдена.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(item_id=item["id"], list_id=item["list_id"])
+    await state.set_state(AdminTopicForm.waiting_for_topic_text)
+    await screens.safe_answer(callback)
+    owner = f" (занял(а): {escape(item['owner_name'])})" if item["owner_name"] else ""
+    if callback.message:
+        await callback.message.answer(
+            f"Тема{owner}:\n<code>{escape(item['topic'])}</code>\n\n"
+            "Отправьте новый текст темы, или «-», чтобы удалить её. Для отмены — /cancel."
+        )
+
+
+@router.message(AdminTopicForm.waiting_for_topic_text, F.text)
+async def save_topic_edit(message: Message, state: FSMContext, db: QueueDB) -> None:
+    if not screens.is_admin(message.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    if message.text.strip() == "-":
+        await state.clear()
+        deleted = await db.delete_topic(data["item_id"])
+        await message.answer("🗑 Тема удалена." if deleted else "Тема уже удалена.",
+                             reply_markup=keyboards.to_edit_list_keyboard(data["list_id"]))
+        return
+    topic = clean_text(message.text)
+    if len(topic) not in TOPIC_LENGTH:
+        await message.answer("Тема должна быть от 2 до 80 символов. Попробуйте ещё раз, «-» для удаления или /cancel.")
+        return
+    result = await db.edit_topic(data["item_id"], topic)
+    if result == "duplicate":
+        await message.answer("Такая тема в списке уже есть. Введите другую или /cancel.")
+        return
+    await state.clear()
+    text = f"✅ Тема изменена: <b>{escape(topic)}</b>" if result == "ok" else "Тема больше не найдена."
+    await message.answer(text, reply_markup=keyboards.to_edit_list_keyboard(data["list_id"]))
+
+
+@router.message(Command("import_topics"))
+async def import_topics(message: Message, db: QueueDB) -> None:
+    if not message.from_user or not screens.is_admin(message.from_user.id):
+        await message.answer("Команда доступна администраторам.")
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) != 3 or not parts[1].isdigit():
+        await message.answer(
+            "Формат: /import_topics ID_списка ссылка_на_Google_Таблицу\n"
+            "В таблице: первый столбец — ФИО, второй — тема. ID списка видно в разделе «📌 Темы»."
+        )
+        return
+    list_id = int(parts[1])
+    topic_list = await db.get_topic_list(list_id)
+    if not topic_list:
+        await message.answer(f"Списка с ID {list_id} нет.")
+        return
+    try:
+        rows = await topics_import.fetch_rows(parts[2].strip())
+    except (ValueError, httpx.HTTPError) as exc:
+        await message.answer(f"Не удалось прочитать таблицу: {escape(str(exc) or type(exc).__name__)}")
+        return
+    result = await db.import_topics(list_id, rows)
+    if result is None:
+        await message.answer("Список больше не найден.")
+        return
+    added, skipped = result
+    note = f" Пропущено: {skipped} (тема уже занята или у человека уже есть тема)." if skipped else ""
+    await message.answer(
+        f"✅ В список «{escape(topic_list['title'])}» добавлено тем: {added}.{note}",
+        reply_markup=keyboards.to_subject_keyboard(topic_list["subject_id"]),
+    )
 
 
 # --- administration ------------------------------------------------------------------------------

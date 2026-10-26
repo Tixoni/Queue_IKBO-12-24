@@ -3,7 +3,6 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import EditMessageText
 
 from src.bot import handlers
-from src.bot.handlers import parse_topics
 
 from tests.conftest import (
     day, make_callback, make_message, schedule_event, shown_buttons, shown_text,
@@ -14,24 +13,6 @@ async def lesson_queue(db) -> tuple[dict, int]:
     await db.sync_schedule([schedule_event("k1", day(1), title="Моделирование")])
     [lesson] = await db.list_schedule_for_date(day(1))
     return lesson, await db.get_or_create_schedule_queue("k1", day(1), "Моделирование")
-
-
-# --- parse_topics ------------------------------------------------------------------
-
-
-def test_parse_topics_valid():
-    assert parse_topics(" Тема 1 \n\nТема 2\n") == ["Тема 1", "Тема 2"]
-
-
-def test_parse_topics_rejects_bad_input():
-    assert parse_topics("") is None
-    assert parse_topics("a\na") is None
-    assert parse_topics("x" * 81) is None
-    assert parse_topics("\n".join(f"t{i}" for i in range(26))) is None
-    assert parse_topics("\n".join("y" * 80 for _ in range(23))) is None  # > 1800 chars in total
-
-
-# --- screens -------------------------------------------------------------------------
 
 
 async def test_join_then_leave_updates_card(db, user):
