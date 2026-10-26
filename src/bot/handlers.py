@@ -212,6 +212,11 @@ async def subjects(callback: CallbackQuery, db: QueueDB) -> None:
     await screens.show(callback, await screens.subjects(db))
 
 
+@router.callback_query(F.data == keyboards.PICK_SUBJECT)
+async def pick_subject(callback: CallbackQuery, db: QueueDB) -> None:
+    await screens.show(callback, await screens.pick_subject(db))
+
+
 @router.callback_query(F.data == keyboards.ALL_TOPICS)
 async def all_topic_lists(callback: CallbackQuery, db: QueueDB) -> None:
     await screens.safe_answer(callback)

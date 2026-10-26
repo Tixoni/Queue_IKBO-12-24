@@ -165,14 +165,23 @@ async def queue(
 
 
 async def subjects(db: QueueDB) -> Screen:
-    current = sorted({Lesson.from_row(row).title for row in await db.list_window_schedule()})
-    items = await db.list_subjects(current)
-    if not items:
-        return Screen("📌 Предметов пока нет: расписание ещё не загружено.", keyboards.back_keyboard())
-    return Screen(
-        "📌 <b>Списки тем</b>\nВыберите предмет. В скобках — сколько у него списков.",
-        keyboards.subjects_keyboard(items),
+    """Only subjects that already have user-created lists."""
+    items = await db.list_subjects()
+    text = (
+        "📌 <b>Списки тем</b>\nВыберите предмет. В скобках — сколько у него списков."
+        if items else "📌 <b>Списки тем</b>\nСписков пока нет — создайте первый."
     )
+    return Screen(text, keyboards.subjects_keyboard(items))
+
+
+async def pick_subject(db: QueueDB) -> Screen:
+    """Subjects from the current timetable, to start a new list."""
+    current = sorted({Lesson.from_row(row).title for row in await db.list_window_schedule()})
+    if not current:
+        return Screen("Расписание ещё не загружено — предметы появятся чуть позже.",
+                      keyboards.back_keyboard(keyboards.TOPICS))
+    return Screen("➕ <b>Новый список тем</b>\nДля какого предмета?",
+                  keyboards.pick_subject_keyboard(await db.list_subjects(current)))
 
 
 def _topic_lists_text(topic_lists: list[dict]) -> str:

@@ -289,17 +289,20 @@ class QueueDB:
             )
             return subject_id or await conn.fetchval("SELECT id FROM subjects WHERE name=$1", name)
 
-    async def list_subjects(self, current: list[str]) -> list[dict]:
-        """Subjects from the current timetable plus any subject that already has lists, with list counts."""
+    async def list_subjects(self, current: list[str] | None = None) -> list[dict]:
+        """With `current` (subject names from the timetable): those subjects, created if missing.
+        Without it: only subjects that already have user-created lists. Both come with list counts."""
         async with self.transaction() as conn:
-            await conn.executemany(
-                "INSERT INTO subjects(name) VALUES($1) ON CONFLICT (name) DO NOTHING", [(n,) for n in current]
-            )
+            if current is not None:
+                await conn.executemany(
+                    "INSERT INTO subjects(name) VALUES($1) ON CONFLICT (name) DO NOTHING", [(n,) for n in current]
+                )
             rows = await conn.fetch(
                 "SELECT s.id, s.name, count(l.id) AS lists FROM subjects s "
-                "LEFT JOIN subject_lists l ON l.subject_id=s.id "
-                "GROUP BY s.id HAVING s.name = ANY($1::text[]) OR count(l.id) > 0 ORDER BY s.name",
-                current,
+                "LEFT JOIN subject_lists l ON l.subject_id=s.id GROUP BY s.id "
+                + ("HAVING s.name = ANY($1::text[]) " if current is not None else "HAVING count(l.id) > 0 ")
+                + "ORDER BY s.name",
+                *([current] if current is not None else []),
             )
             return [dict(row) for row in rows]
 

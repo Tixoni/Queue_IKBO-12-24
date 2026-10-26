@@ -100,22 +100,34 @@ def queue_keyboard(
 ALL_TOPICS = "ui:topics:all"
 
 
-def subjects_keyboard(subjects: list[dict]) -> InlineKeyboardMarkup:
-    buttons = [[_button("📋 Все списки тем", ALL_TOPICS)]] + [
+PICK_SUBJECT = "ui:tl:pick"
+
+
+def _subject_buttons(subjects: list[dict]) -> list[list[InlineKeyboardButton]]:
+    return [
         [_button(f"{item['name'][:56]}" + (f" ({item['lists']})" if item["lists"] else ""), f"ui:subj:{item['id']}")]
         for item in subjects
     ]
-    return _markup(buttons + [[_button("🏠 Главное меню", HOME)]])
+
+
+def subjects_keyboard(subjects: list[dict]) -> InlineKeyboardMarkup:
+    top = [[_button("📋 Все списки тем", ALL_TOPICS)]] if subjects else []
+    bottom = [[_button("➕ Создать список", PICK_SUBJECT)], [_button("🏠 Главное меню", HOME)]]
+    return _markup(top + _subject_buttons(subjects) + bottom)
+
+
+def pick_subject_keyboard(subjects: list[dict]) -> InlineKeyboardMarkup:
+    return _markup(_subject_buttons(subjects) + _nav(TOPICS, "↩️ К спискам тем"))
 
 
 def after_all_topics_keyboard() -> InlineKeyboardMarkup:
-    return _markup([[_button("↩️ К предметам", TOPICS)], [_button("🏠 Главное меню", HOME)]])
+    return _markup([[_button("↩️ К спискам тем", TOPICS)], [_button("🏠 Главное меню", HOME)]])
 
 
 def subject_keyboard(subject_id: int, topic_lists: list[dict]) -> InlineKeyboardMarkup:
     rows = [[_button("➕ Новый список", f"ui:tl:new:{subject_id}")]]
     rows += [[_button(f"✏️ Дополнить: {item['title'][:44]}", f"ui:tl:add:{item['id']}")] for item in topic_lists]
-    return _markup(rows + _nav(TOPICS, "↩️ К предметам"))
+    return _markup(rows + _nav(TOPICS, "↩️ К спискам тем"))
 
 
 def to_subject_keyboard(subject_id: int) -> InlineKeyboardMarkup:
