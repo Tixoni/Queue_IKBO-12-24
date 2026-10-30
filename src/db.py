@@ -82,7 +82,23 @@ CREATE TABLE IF NOT EXISTS profiles (
     display_name TEXT NOT NULL,
     name_changed BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+-- Premium: users an admin picked to get "people started joining" alerts.
+CREATE TABLE IF NOT EXISTS premium_users (
+    user_id BIGINT PRIMARY KEY,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One alert per queue per user.
+CREATE TABLE IF NOT EXISTS premium_notifications (
+    deadline_id BIGINT NOT NULL REFERENCES deadlines(id),
+    user_id BIGINT NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (deadline_id, user_id)
+);
 """
+
+PREMIUM_ALERT_MIN_PEOPLE = 2
 
 
 def booking_window() -> tuple[date, date]:
@@ -499,3 +515,42 @@ class QueueDB:
             "UPDATE profiles SET name_changed=FALSE WHERE user_id=$1 RETURNING user_id", user_id
         )
         return updated is not None
+
+    # --- premium alerts -------------------------------------------------------
+
+    async def list_premium_candidates(self) -> list[dict]:
+        """Everyone the bot knows (profiles), premium users first."""
+        return await self._all(
+            "SELECT p.user_id, p.display_name, (pu.user_id IS NOT NULL) AS premium "
+            "FROM profiles p LEFT JOIN premium_users pu ON pu.user_id=p.user_id "
+            "ORDER BY premium DESC, p.display_name"
+        )
+
+    async def toggle_premium(self, user_id: int) -> bool | None:
+        """Switch premium on/off. Returns the new state, or None if the bot does not know this user."""
+        async with self.transaction() as conn:
+            if not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM profiles WHERE user_id=$1)", user_id):
+                return None
+            if await conn.fetchval("DELETE FROM premium_users WHERE user_id=$1 RETURNING user_id", user_id):
+                return False
+            await conn.execute("INSERT INTO premium_users(user_id) VALUES($1)", user_id)
+            return True
+
+    async def claim_premium_alerts(self, deadline_id: int) -> list[int]:
+        """Premium users to alert about this queue: it has PREMIUM_ALERT_MIN_PEOPLE+ people, the user is not
+        in it and was not alerted about it before. Claiming marks them as alerted, so each gets it once."""
+        async with self.transaction() as conn:
+            # Lock the queue row: two joins at once must not both decide to send the alert.
+            if not await conn.fetchval("SELECT id FROM deadlines WHERE id=$1 AND active FOR UPDATE", deadline_id):
+                return []
+            people = await conn.fetchval("SELECT count(*) FROM registrations WHERE deadline_id=$1", deadline_id)
+            if people < PREMIUM_ALERT_MIN_PEOPLE:
+                return []
+            rows = await conn.fetch(
+                "INSERT INTO premium_notifications(deadline_id, user_id) "
+                "SELECT $1, pu.user_id FROM premium_users pu "
+                "WHERE NOT EXISTS (SELECT 1 FROM registrations r WHERE r.deadline_id=$1 AND r.user_id=pu.user_id) "
+                "ON CONFLICT DO NOTHING RETURNING user_id",
+                deadline_id,
+            )
+            return [row["user_id"] for row in rows]

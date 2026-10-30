@@ -1,17 +1,17 @@
 import logging
 from html import escape
 
-from aiogram import F, Router
+import httpx
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
+from src import topics_import
 from src.bot import keyboards, screens
 from src.bot.formatting import clean_text
-import httpx
-
-from src import topics_import
 from src.db import (
     ALREADY_HAS_TOPIC, DUPLICATE_TOPIC_LIST, JOINED, LIST_MISSING, MAX_TOPICS_PER_LIST, TAKEN, TOPIC_BUSY,
     TOPIC_LIST_FULL_STATUS, QueueDB,
@@ -153,11 +153,28 @@ async def queue(callback: CallbackQuery, db: QueueDB) -> None:
 
 
 @router.callback_query(F.data.startswith("ui:join:"))
-async def join(callback: CallbackQuery, db: QueueDB) -> None:
+async def join(callback: CallbackQuery, db: QueueDB, bot: Bot) -> None:
     deadline_id = int(callback_arg(callback))
     result = await db.join(deadline_id, callback.from_user.id, await screens.display_name(db, callback.from_user))
     await screens.safe_answer(callback, result, show_alert=result != JOINED)
     await screens.show(callback, await screens.queue(db, callback.from_user, deadline_id), answer=False)
+    if result == JOINED:
+        await send_premium_alerts(bot, db, deadline_id)
+
+
+async def send_premium_alerts(bot: Bot, db: QueueDB, deadline_id: int) -> None:
+    """Tell premium users that people started joining a queue they are not in (once per queue)."""
+    recipients = await db.claim_premium_alerts(deadline_id)
+    if not recipients:
+        return
+    alert = await screens.premium_alert(db, deadline_id)
+    if alert is None:
+        return
+    for user_id in recipients:
+        try:
+            await bot.send_message(user_id, alert.text, reply_markup=alert.keyboard)
+        except TelegramAPIError as exc:  # blocked the bot, never pressed /start, etc.
+            log.warning("Premium alert to %s failed: %s", user_id, exc)
 
 
 @router.callback_query(F.data.startswith("ui:leave:"))
@@ -449,6 +466,25 @@ async def admin_panel(callback: CallbackQuery) -> None:
     await screens.show(callback, screens.admin_panel())
 
 
+@router.callback_query(F.data == keyboards.PREMIUM)
+async def premium_panel(callback: CallbackQuery, db: QueueDB) -> None:
+    if not screens.is_admin(callback.from_user.id):
+        await screens.safe_answer(callback, "Нет доступа", show_alert=True)
+        return
+    await screens.show(callback, await screens.premium(db))
+
+
+@router.callback_query(F.data.startswith("ui:prem:"))
+async def toggle_premium(callback: CallbackQuery, db: QueueDB) -> None:
+    if not screens.is_admin(callback.from_user.id):
+        await screens.safe_answer(callback, "Нет доступа", show_alert=True)
+        return
+    enabled = await db.toggle_premium(int(callback_arg(callback)))
+    note = {True: "⭐ Уведомления включены", False: "Уведомления выключены", None: "Пользователь не найден"}[enabled]
+    await screens.safe_answer(callback, note)
+    await screens.show(callback, await screens.premium(db), answer=False)
+
+
 @router.callback_query(F.data.startswith("ui:rename:"))
 async def start_rename(callback: CallbackQuery, state: FSMContext, db: QueueDB) -> None:
     if not screens.is_admin(callback.from_user.id):
@@ -490,7 +526,7 @@ async def save_rename(message: Message, state: FSMContext, db: QueueDB) -> None:
 
 
 @router.message(Command("admin_add_user"))
-async def admin_add_user(message: Message, db: QueueDB) -> None:
+async def admin_add_user(message: Message, db: QueueDB, bot: Bot) -> None:
     if not message.from_user or not screens.is_admin(message.from_user.id):
         await message.answer("Команда доступна администраторам.")
         return
@@ -501,6 +537,8 @@ async def admin_add_user(message: Message, db: QueueDB) -> None:
         await message.answer("Формат: /admin_add_user ID_очереди TELEGRAM_ID Имя")
         return
     await message.answer("✅ Пользователь добавлен." if added else "Очередь не найдена или пользователь уже записан.")
+    if added:
+        await send_premium_alerts(bot, db, int(deadline_id))
 
 
 @router.message(Command("admin_set_name"))

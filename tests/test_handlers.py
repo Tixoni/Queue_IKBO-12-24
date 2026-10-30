@@ -1,4 +1,6 @@
 """Handlers and screens driven with fake Telegram objects and a real temporary database."""
+from unittest.mock import AsyncMock
+
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import EditMessageText
 
@@ -19,13 +21,13 @@ async def test_join_then_leave_updates_card(db, user):
     _, queue_id = await lesson_queue(db)
 
     callback = make_callback(user, f"ui:join:{queue_id}")
-    await handlers.join(callback, db)
+    await handlers.join(callback, db, AsyncMock())
     callback.answer.assert_awaited_with("Вы добавлены в очередь.", show_alert=False)
     assert "1. Иван Петров" in shown_text(callback)
     assert any(d.startswith("ui:leave:") for _, d in shown_buttons(callback))
 
     callback = make_callback(user, f"ui:join:{queue_id}")
-    await handlers.join(callback, db)
+    await handlers.join(callback, db, AsyncMock())
     callback.answer.assert_awaited_with("Вы уже записаны.", show_alert=True)
 
     callback = make_callback(user, f"ui:leave:{queue_id}")
@@ -39,7 +41,7 @@ async def test_old_button_press_does_not_break_handler(db, user):
     callback = make_callback(user, f"ui:join:{queue_id}")
     callback.answer.side_effect = TelegramBadRequest(EditMessageText(text="x"), "query is too old")
 
-    await handlers.join(callback, db)
+    await handlers.join(callback, db, AsyncMock())
     assert await db.get_queue(queue_id) == ["Иван Петров"]
     assert "1. Иван Петров" in shown_text(callback)
 
@@ -84,16 +86,16 @@ async def test_admin_add_user_command(db, admin, user):
     _, queue_id = await lesson_queue(db)
 
     message = make_message(user, f"/admin_add_user {queue_id} 5 Вася")
-    await handlers.admin_add_user(message, db)
+    await handlers.admin_add_user(message, db, AsyncMock())
     assert "администраторам" in message.answer.await_args.args[0]
 
     message = make_message(admin, f"/admin_add_user {queue_id} 5 Вася‮ Пупкин")
-    await handlers.admin_add_user(message, db)
+    await handlers.admin_add_user(message, db, AsyncMock())
     assert "добавлен" in message.answer.await_args.args[0]
     assert await db.get_queue(queue_id) == ["Вася Пупкин"]
 
     message = make_message(admin, "/admin_add_user abc")
-    await handlers.admin_add_user(message, db)
+    await handlers.admin_add_user(message, db, AsyncMock())
     assert "Формат" in message.answer.await_args.args[0]
 
 

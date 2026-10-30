@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User
 from src.bot import keyboards
 from src.bot.formatting import Lesson, clean_text, lesson_matches_title, numbered, pretty_date
 from src.config import settings
-from src.db import QueueDB
+from src.db import PREMIUM_ALERT_MIN_PEOPLE, QueueDB
 
 TOPIC_LISTS_TEXT_LIMIT = 3300
 log = logging.getLogger(__name__)
@@ -292,5 +292,36 @@ def admin_panel() -> Screen:
         "• /admin_set_name TELEGRAM_ID Имя — принудительно задать имя студенту\n"
         "• /admin_allow_name_change TELEGRAM_ID — разрешить повторную смену имени\n"
         "• /import_topics ID_списка ссылка — заполнить список из Google Таблицы (ФИО | тема)",
-        keyboards.back_keyboard(),
+        keyboards.admin_keyboard(),
+    )
+
+
+async def premium(db: QueueDB) -> Screen:
+    people = await db.list_premium_candidates()
+    count = sum(person["premium"] for person in people)
+    text = (
+        "⭐ <b>Премиум-уведомления</b>\n\n"
+        "Отмеченным людям бот пишет, когда в очередь, где их нет, записалось "
+        f"{PREMIUM_ALERT_MIN_PEOPLE} и более человек — по каждой очереди один раз.\n"
+        "Нажмите на человека, чтобы включить или выключить.\n\n"
+        f"Сейчас включено: {count}."
+    )
+    if not people:
+        text += "\n\nПока никто не пользовался ботом — список появится, когда люди нажмут /start."
+    if len(people) > 95:
+        text += f"\n\nПоказаны первые 95 из {len(people)}."
+    return Screen(text, keyboards.premium_keyboard(people))
+
+
+async def premium_alert(db: QueueDB, deadline_id: int) -> Screen | None:
+    deadline = await db.get_deadline(deadline_id)
+    if not deadline:
+        return None
+    people = len(await db.get_queue(deadline_id))
+    return Screen(
+        "🔔 <b>В очередь начали записываться</b>\n\n"
+        f"📘 {escape(deadline['title'])}\n"
+        f"📅 {pretty_date(deadline['event_date'])}\n"
+        f"👥 Уже записано: {people} чел.",
+        keyboards.open_queue_keyboard(deadline_id),
     )

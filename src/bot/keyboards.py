@@ -157,3 +157,22 @@ def to_subject_keyboard(subject_id: int) -> InlineKeyboardMarkup:
 
 def to_queue_keyboard(deadline_id: int) -> InlineKeyboardMarkup:
     return _markup([[_button("↩️ Вернуться к очереди", f"ui:deadline:{deadline_id}")]])
+
+
+PREMIUM = "ui:premium"
+
+
+def admin_keyboard() -> InlineKeyboardMarkup:
+    return _markup([[_button("⭐ Премиум-уведомления", PREMIUM)]] + _nav(HOME))
+
+
+def premium_keyboard(people: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [_button(("⭐ " if person["premium"] else "▫️ ") + person["display_name"][:50], f"ui:prem:{person['user_id']}")]
+        for person in people[:95]  # Telegram allows up to 100 buttons in one message
+    ]
+    return _markup(rows + _nav("ui:admin"))
+
+
+def open_queue_keyboard(deadline_id: int) -> InlineKeyboardMarkup:
+    return _markup([[_button("👥 Открыть очередь", f"ui:deadline:{deadline_id}")]])
