@@ -27,7 +27,7 @@ PostgreSQL наружу не открыт: в `docker-compose.yml` у него �
 
 Данные лежат в томе `pgdata` и переживают `docker compose down` и пересборку (удаляет их только `docker compose down -v`).
 
-**Перенос базы со старого хостинга.** Сделайте дамп старой базы (`pg_dump --format=custom --no-owner --no-privileges --file=queue.dump "<строка подключения>"`), затем на новом сервере:
+**Перенос базы со старого хостинга.** Сделайте дамп старой базы (`pg_dump --format=custom --no-owner --no-privileges --file=queue.dump "<строка подключения>"`). Версия `pg_dump` должна быть не ниже версии сервера — на Railway это PostgreSQL 18, удобно взять его из Docker: `docker run --rm -v "%cd%:/backup" mirror.gcr.io/library/postgres:18-alpine pg_dump ... -f /backup/queue.dump "<URL>"` (зеркало `mirror.gcr.io` работает, когда Docker Hub недоступен). Затем на новом сервере:
 
 ```
 docker compose --env-file secrets/.env up -d --wait db

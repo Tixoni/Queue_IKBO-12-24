@@ -6,14 +6,14 @@
 
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:18-alpine  # same major version as the Railway database the dump comes from
     restart: unless-stopped
     environment:
       POSTGRES_DB: queue
       POSTGRES_USER: queue
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in secrets/.env}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql  # PostgreSQL 18+ images keep data in a versioned subfolder here
     networks:
       - internal
     healthcheck:
