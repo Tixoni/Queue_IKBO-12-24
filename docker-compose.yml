@@ -1,0 +1,50 @@
+# Bot + PostgreSQL. Start:  docker compose --env-file secrets/.env up -d --build
+#
+# PostgreSQL publishes no ports: it sits only on the `internal` network, so it is unreachable
+# from the host and the internet and cannot clash with anything already listening on the server.
+# Only the bot talks to it, by the service name `db`.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: queue
+      POSTGRES_USER: queue
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in secrets/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queue -d queue"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: secrets/.env
+    environment:
+      # Overrides DATABASE_URL from secrets/.env (that one is for running the bot without Docker).
+      DATABASE_URL: postgresql://queue:${POSTGRES_PASSWORD}@db:5432/queue
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal  # to reach the database
+      - outside   # to reach Telegram
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  internal:
+    internal: true  # no route to the outside world
+  outside:
+
+volumes:
+  pgdata:

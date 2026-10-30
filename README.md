@@ -14,6 +14,31 @@ Python 3.11+, aiogram 3, PostgreSQL (asyncpg). Бот работает чере�
 
 При сетевой ошибке `api.telegram.org` проверьте доступ Telegram Bot API из вашей сети; бот автоматически повторяет попытки подключения.
 
+## Запуск в Docker (бот + PostgreSQL)
+
+Нужны Docker и Docker Compose. В `secrets/.env` (образец — `.env.example`) задайте `BOT_TOKEN`, `ADMIN_IDS` и пароль базы `POSTGRES_PASSWORD` — только латиница и цифры, он подставляется в строку подключения. `DATABASE_URL` для Docker не нужен: compose собирает его сам.
+
+```
+docker compose --env-file secrets/.env up -d --build
+docker compose logs -f bot
+```
+
+PostgreSQL наружу не открыт: в `docker-compose.yml` у него нет `ports`, он подключён только к внутренней сети `internal` (без выхода в интернет), и до него достаёт только бот по имени `db`. Поэтому на сервере не занимается порт 5432 и не будет конфликта с другим PostgreSQL. Проверка: `docker compose ps` — в колонке PORTS у `db` пусто, только `5432/tcp`, без `0.0.0.0:`.
+
+Данные лежат в томе `pgdata` и переживают `docker compose down` и пересборку (удаляет их только `docker compose down -v`).
+
+**Перенос базы со старого хостинга.** Сделайте дамп старой базы (`pg_dump --format=custom --no-owner --no-privileges --file=queue.dump "<строка подключения>"`), затем на новом сервере:
+
+```
+docker compose --env-file secrets/.env up -d --wait db
+docker compose --env-file secrets/.env exec -T db pg_restore -U queue -d queue --no-owner --no-privileges < queue.dump
+docker compose --env-file secrets/.env up -d --build bot
+```
+
+Бот запускается после восстановления, чтобы он не успел создать пустые таблицы. Файл дампа содержит данные студентов — удалите его после переноса.
+
+**Бэкап:** `docker compose --env-file secrets/.env exec -T db pg_dump -U queue -d queue --format=custom > backup.dump`.
+
 ## Структура кода
 
 - `main.py` — сборка: БД, клиент расписания, диспетчер, polling.
